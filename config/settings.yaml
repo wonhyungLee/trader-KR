@@ -42,7 +42,7 @@ database:
 
 # DB -> CSV export (선택)
 export_csv:
-  enabled: true
+  enabled: false
   out_dir: "data/csv"
   mode: "overwrite"
   tables: []

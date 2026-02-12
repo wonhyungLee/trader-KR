@@ -247,8 +247,8 @@ def main():
                 # Get global done count
                 done_count = store.conn.execute("SELECT count(*) FROM refill_progress WHERE status='DONE'").fetchone()[0]
                 
-                # Notify after CSV export
-                msg = f"✅ [refill] {code} 완료 및 CSV 저장됨 ({done_count}/{total_universe_count})"
+                # Notify after each stock completion
+                msg = f"✅ [refill] {code} 완료 ({done_count}/{total_universe_count})"
                 maybe_notify(settings, msg)
                 
                 # Prevent Discord rate limit
