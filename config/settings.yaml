@@ -1,0 +1,72 @@
+env: "paper"
+site_url: "http://trader.r-e.kr"
+
+# 자동매매/주문/잔고 기능은 제거된 "조회 전용" 서버입니다.
+# 데이터 수집 스크립트에서 KIS API를 쓰려면 아래 환경변수를 설정하세요:
+#   KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT_NO(선택)
+
+# Discord 알림 (DB 작업 모니터링)
+discord:
+  enabled: true
+  webhook: "${DISCORD_WEBHOOK_URL}"
+
+kis:
+  env: "paper"
+  base_url_prod: "https://openapi.koreainvestment.com:9443"
+  base_url_paper: "https://openapivts.koreainvestment.com:29443"
+  ws_url_prod: "ws://ops.koreainvestment.com:21000"
+  ws_url_paper: "ws://ops.koreainvestment.com:31000"
+  app_key: "${KIS_APP_KEY}"
+  app_secret: "${KIS_APP_SECRET}"
+  use_hashkey: true
+  hashkey_cache_ttl_sec: 30
+  account_no: "${KIS_ACCOUNT_NO}"
+  custtype: "P"
+  token_cache_path: ".cache/kis_token.json"
+  # 1/4 throughput vs default 0.25s (lower rate to avoid limit issues)
+  rate_limit_sleep_sec: 1.0
+  accuracy_rate_limit_sleep_sec: 1.0
+  timeout_connect_sec: 5
+  timeout_read_sec: 20
+  max_retries: 6
+  backoff_base_sec: 2
+  backoff_cap_sec: 60
+  backoff_jitter_sec: 0.5
+  consecutive_error_cooldown_after: 10
+  consecutive_error_cooldown_sec: 180
+  auth_forbidden_cooldown_sec: 600
+  session_reset_every: 3
+
+database:
+  path: "data/market_data.db"
+
+# DB -> CSV export (선택)
+export_csv:
+  enabled: true
+  out_dir: "data/csv"
+  mode: "overwrite"
+  tables: []
+
+# Universe CSV 파일 경로 (KOSPI200 + KOSDAQ150)
+universe:
+  groups:
+    - path: "data/universe_kospi200.csv"
+      group_name: "KOSPI200"
+    - path: "data/universe_kosdaq150.csv"
+      group_name: "KOSDAQ150"
+
+# 예시 전략 파라미터 (selection 후보 계산에만 사용)
+strategy:
+  entry_mode: "mean_reversion"
+  liquidity_rank: 350
+  min_amount: 50000000000  # 500억
+  rank_mode: "amount"
+  disparity_buy_kospi: -0.05
+  disparity_buy_kosdaq: -0.10
+  disparity_sell: -0.01
+  stop_loss: -0.05
+  max_holding_days: 3
+  max_positions: 10
+  max_per_sector: 0
+  trend_ma25_rising: false
+  selection_horizon_days: 1

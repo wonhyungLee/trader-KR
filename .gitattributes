@@ -1,0 +1,2 @@
+data/csv/daily_price.csv filter=lfs diff=lfs merge=lfs -text
+data/csv/*.csv filter=lfs diff=lfs merge=lfs -text

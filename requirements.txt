@@ -1,0 +1,11 @@
+pandas
+numpy
+requests
+pyyaml
+matplotlib
+tqdm
+finance-datareader
+python-dateutil
+flask
+flask-cors
+websockets

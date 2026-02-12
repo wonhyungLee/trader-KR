@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kis-code-assistant-mcp": {
+      "url": "https://server.smithery.ai/@KISOpenAPI/kis-code-assistant-mcp/mcp",
+      "type": "http"
+    }
+  }
+}

@@ -1,0 +1,1074 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import logging
+import json
+import subprocess
+import time
+import threading
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
+
+from src.analyzer.backtest_runner import load_strategy
+from src.storage.sqlite_store import SQLiteStore
+from src.utils.config import load_settings, list_kis_key_inventory, set_kis_key_enabled
+from src.utils.notifier import maybe_notify
+from src.utils.db_exporter import maybe_export_db
+from src.utils.project_root import ensure_repo_root
+
+# Ensure relative paths resolve from repo root (e.g. data/*, config/*)
+ensure_repo_root(Path(__file__).resolve().parent)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+DB_PATH = Path("data/market_data.db")
+FRONTEND_DIST = Path("frontend/dist")
+CLIENT_ERROR_LOG = Path("logs/client_error.log")
+KIS_TOGGLE_PASSWORD = os.getenv("KIS_TOGGLE_PASSWORD", "lee37535**")
+FILTER_TOGGLE_PATH = Path("data/selection_filter_toggles.json")
+FILTER_TOGGLE_KEYS = ("min_amount", "liquidity", "disparity")
+_selection_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+SELECTION_NOTIFY_PATH = Path("data/selection_notify_state.json")
+SELECTION_NOTIFY_COOLDOWN_SEC = int(os.getenv("SELECTION_NOTIFY_COOLDOWN_SEC", "300"))
+SELECTION_NOTIFY_INTERVAL_SEC = int(os.getenv("SELECTION_NOTIFY_INTERVAL_SEC", "60"))
+DISABLE_TRADING_ENDPOINTS = True
+
+# Create DB and tables if missing
+_store = SQLiteStore(str(DB_PATH))
+_store.conn.close()
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _count(conn: sqlite3.Connection, table_expr: str) -> int:
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {table_expr}").fetchone()[0]
+    except Exception:
+        return 0
+
+
+def _minmax(conn: sqlite3.Connection, table: str) -> dict:
+    try:
+        row = conn.execute(f"SELECT MIN(date), MAX(date) FROM {table}").fetchone()
+        return {"min": row[0], "max": row[1]}
+    except Exception:
+        return {"min": None, "max": None}
+
+
+def _distinct_code_count(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        return conn.execute(f"SELECT COUNT(DISTINCT code) FROM {table}").fetchone()[0]
+    except Exception:
+        return 0
+
+
+def _missing_codes(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM universe_members u
+            LEFT JOIN (SELECT DISTINCT code FROM {table}) t
+            ON u.code = t.code
+            WHERE t.code IS NULL
+            """
+        ).fetchone()
+        return row[0]
+    except Exception:
+        return 0
+
+
+def _pgrep(pattern: str) -> bool:
+    try:
+        res = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _load_filter_toggles(path: Path = FILTER_TOGGLE_PATH) -> Dict[str, bool]:
+    defaults = {key: True for key in FILTER_TOGGLE_KEYS}
+    if not path.exists():
+        return defaults
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return defaults
+    if not isinstance(payload, dict):
+        return defaults
+    out = defaults.copy()
+    for key in FILTER_TOGGLE_KEYS:
+        if key in payload:
+            out[key] = bool(payload.get(key))
+    return out
+
+
+def _save_filter_toggles(toggles: Dict[str, bool], path: Path = FILTER_TOGGLE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {key: bool(toggles.get(key, True)) for key in FILTER_TOGGLE_KEYS}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_selection_notify_state(path: Path = SELECTION_NOTIFY_PATH) -> Dict[str, Any]:
+    default = {"last_codes": [], "last_ts": 0.0, "pending_codes": []}
+    if not path.exists():
+        return default
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    if not isinstance(payload, dict):
+        return default
+    out = default.copy()
+    for key in default:
+        if key in payload:
+            out[key] = payload.get(key)
+    return out
+
+
+def _save_selection_notify_state(payload: Dict[str, Any], path: Path = SELECTION_NOTIFY_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe = {
+        "last_codes": payload.get("last_codes") or [],
+        "last_ts": float(payload.get("last_ts") or 0.0),
+        "pending_codes": payload.get("pending_codes") or [],
+    }
+    path.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _async_notify(settings: Dict[str, Any], message: str) -> None:
+    if not message:
+        return
+    thread = threading.Thread(target=maybe_notify, args=(settings, message), daemon=True)
+    thread.start()
+
+
+def _format_candidate_line(code: str, info: Dict[str, Any]) -> str:
+    name = info.get("name") or ""
+    close = _safe_float(info.get("close"))
+    disp = _safe_float(info.get("disparity"))
+    parts = [code, name]
+    if close is not None:
+        parts.append(f"{close:,.0f}")
+    if disp is not None:
+        parts.append(f"disp={disp:.2f}")
+    return " ".join([p for p in parts if p])
+
+
+def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) -> None:
+    candidates = snapshot.get("candidates") or []
+    now_ts = time.time()
+    state_exists = SELECTION_NOTIFY_PATH.exists()
+    if not candidates:
+        _save_selection_notify_state({"last_codes": [], "last_ts": 0.0, "pending_codes": []})
+        return
+    codes = [str(c.get("code") or "").zfill(6) for c in candidates if c.get("code")]
+    if not codes:
+        return
+
+    state = _load_selection_notify_state()
+    last_codes = set(state.get("last_codes") or [])
+    pending = list(state.get("pending_codes") or [])
+
+    # Initialize state without sending notifications on first run
+    if not last_codes and not state_exists:
+        _save_selection_notify_state({"last_codes": codes, "last_ts": now_ts, "pending_codes": []})
+        return
+
+    new_codes = [c for c in codes if c not in last_codes]
+    if new_codes:
+        pending = list(dict.fromkeys(pending + new_codes))
+
+    if not pending:
+        state["last_codes"] = codes
+        _save_selection_notify_state(state)
+        return
+
+    cooldown_ok = now_ts - float(state.get("last_ts") or 0.0) >= SELECTION_NOTIFY_COOLDOWN_SEC
+    if not cooldown_ok:
+        _save_selection_notify_state({"last_codes": codes, "last_ts": state.get("last_ts") or 0.0, "pending_codes": pending})
+        return
+
+    info_map = {str(c.get("code") or "").zfill(6): c for c in candidates}
+    lines = [_format_candidate_line(code, info_map.get(code, {})) for code in pending[:12]]
+    detail = ", ".join([line for line in lines if line])
+    msg = f"[selection] new {len(pending)} / total {len(codes)}"
+    if snapshot.get("date"):
+        msg += f" date={snapshot.get('date')}"
+    if detail:
+        msg += f" | {detail}"
+
+    _async_notify(settings, msg)
+    _save_selection_notify_state({"last_codes": codes, "last_ts": now_ts, "pending_codes": []})
+
+
+def _disabled_response():
+    return jsonify({"error": "disabled"}), 404
+
+
+def _selection_notify_loop() -> None:
+    interval = SELECTION_NOTIFY_INTERVAL_SEC
+    if interval <= 0:
+        return
+    while True:
+        try:
+            settings = load_settings()
+            conn = get_conn()
+            try:
+                _build_selection_snapshot(conn, settings, force=True)
+            finally:
+                conn.close()
+        except Exception as exc:
+            logging.warning("selection notify loop error: %s", exc)
+        time.sleep(max(10, interval))
+
+
+def _verify_toggle_password(payload: Dict[str, Any]) -> bool:
+    pw = str(payload.get("password") or "")
+    return pw == KIS_TOGGLE_PASSWORD
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+        return float(value)
+    except Exception:
+        return None
+
+
+def _latest_price_map(conn: sqlite3.Connection, codes: list[str]) -> Dict[str, Dict[str, Any]]:
+    if not codes:
+        return {}
+    placeholder = ",".join("?" * len(codes))
+    sql = f"""
+        SELECT d.code, d.close, d.date
+        FROM daily_price d
+        JOIN (
+            SELECT code, MAX(date) AS max_date
+            FROM daily_price
+            WHERE code IN ({placeholder})
+            GROUP BY code
+        ) m
+        ON d.code = m.code AND d.date = m.max_date
+    """
+    rows = conn.execute(sql, tuple(codes)).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        out[row[0]] = {"close": row[1], "date": row[2]}
+    return out
+
+
+def _dummy_portfolio_positions(conn: sqlite3.Connection, max_positions: int = 8) -> list[Dict[str, Any]]:
+    _ensure_latest_table(conn)
+    sql = """
+        SELECT l.code, l.date, l.close, l.amount,
+               u.name, u.market, s.sector_name, s.industry_name
+        FROM daily_price_latest l
+        LEFT JOIN universe_members u ON l.code = u.code
+        LEFT JOIN sector_map s ON l.code = s.code
+        ORDER BY l.amount DESC
+        LIMIT ?
+    """
+    df = pd.read_sql_query(sql, conn, params=(max_positions,))
+    if df.empty:
+        return []
+    budget_per_pos = 10_000_000
+    now = pd.Timestamp.utcnow().isoformat()
+    records: list[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        close = _safe_float(row.get("close")) or 0.0
+        qty = max(1, int(budget_per_pos / close)) if close > 0 else 0
+        avg_price = close * 0.97 if close > 0 else 0.0
+        records.append({
+            "code": row.get("code"),
+            "name": row.get("name") or row.get("code"),
+            "qty": qty,
+            "avg_price": avg_price,
+            "entry_date": row.get("date"),
+            "updated_at": now,
+            "market": row.get("market"),
+            "sector_name": row.get("sector_name"),
+            "industry_name": row.get("industry_name"),
+            "last_close": close,
+            "last_date": row.get("date"),
+        })
+    return records
+
+
+def _build_portfolio(conn: sqlite3.Connection) -> Dict[str, Any]:
+    records = _dummy_portfolio_positions(conn, max_positions=10)
+    total_value = 0.0
+    total_cost = 0.0
+    for row in records:
+        qty = float(row.get("qty") or 0)
+        avg_price = float(row.get("avg_price") or 0)
+        last_close = float(row.get("last_close") or 0)
+        cost = qty * avg_price if qty and avg_price else 0.0
+        market_value = qty * last_close if qty and last_close else 0.0
+        pnl = market_value - cost
+        pnl_pct = (pnl / cost * 100) if cost else None
+        row.update({
+            "market_value": market_value,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+        })
+        total_value += market_value
+        total_cost += cost
+    totals = {
+        "positions_value": total_value,
+        "cost": total_cost,
+        "pnl": total_value - total_cost if total_cost else None,
+        "pnl_pct": ((total_value - total_cost) / total_cost * 100) if total_cost else None,
+    }
+    return {"positions": records, "totals": totals}
+
+
+def _build_account_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
+    portfolio = _build_portfolio(conn)
+    totals = portfolio.get("totals", {})
+    cash = 50_000_000.0
+    positions_value = float(totals.get("positions_value") or 0.0)
+    total_assets = cash + positions_value
+    total_pnl = totals.get("pnl")
+    total_pnl_pct = totals.get("pnl_pct")
+    return {
+        "connected": False,
+        "connected_at": pd.Timestamp.utcnow().isoformat(),
+        "summary": {
+            "total_assets": total_assets,
+            "cash": cash,
+            "positions_value": positions_value,
+            "total_pnl": total_pnl,
+            "total_pnl_pct": total_pnl_pct,
+        },
+    }
+
+
+def _build_plans(conn: sqlite3.Connection, selection_data: Dict[str, Any]) -> Dict[str, Any]:
+    candidates = selection_data.get("candidates") or []
+    exec_date = selection_data.get("date")
+    budget_per_pos = 10_000_000
+    buys = []
+    for idx, row in enumerate(candidates[:12], start=1):
+        price = _safe_float(row.get("close")) or 0.0
+        qty = max(1, int(budget_per_pos / price)) if price > 0 else 0
+        buys.append({
+            "id": idx,
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "planned_price": price,
+            "qty": qty,
+        })
+    return {"exec_date": exec_date, "buys": buys, "sells": [], "counts": {"buys": len(buys), "sells": 0}}
+
+
+def _ensure_latest_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_price_latest (
+            code TEXT PRIMARY KEY,
+            date TEXT,
+            close REAL,
+            amount REAL,
+            ma25 REAL,
+            disparity REAL
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_daily_price_latest
+        AFTER INSERT ON daily_price
+        BEGIN
+            INSERT INTO daily_price_latest(code, date, close, amount, ma25, disparity)
+            VALUES (NEW.code, NEW.date, NEW.close, NEW.amount, NEW.ma25, NEW.disparity)
+            ON CONFLICT(code) DO UPDATE SET
+                date=excluded.date,
+                close=excluded.close,
+                amount=excluded.amount,
+                ma25=excluded.ma25,
+                disparity=excluded.disparity
+            WHERE excluded.date >= daily_price_latest.date OR daily_price_latest.date IS NULL;
+        END;
+        """
+    )
+    row = conn.execute("SELECT COUNT(*) FROM daily_price_latest").fetchone()
+    if row and row[0] == 0:
+        conn.execute(
+            """
+            INSERT INTO daily_price_latest(code, date, close, amount, ma25, disparity)
+            SELECT d.code, d.date, d.close, d.amount, d.ma25, d.disparity
+            FROM daily_price d
+            JOIN (
+                SELECT code, MAX(date) AS max_date
+                FROM daily_price
+                GROUP BY code
+            ) m
+            ON d.code = m.code AND d.date = m.max_date
+            """
+        )
+    conn.commit()
+
+
+def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
+    now_ts = time.time()
+    cached = _selection_cache.get("data")
+    if not force and cached and now_ts - _selection_cache.get("ts", 0) < 30:
+        return cached
+
+    params = load_strategy(settings)
+    min_amount = float(getattr(params, "min_amount", 0) or 0)
+    liquidity_rank = int(getattr(params, "liquidity_rank", 0) or 0)
+    buy_kospi = float(getattr(params, "buy_kospi", 0) or 0)
+    buy_kosdaq = float(getattr(params, "buy_kosdaq", 0) or 0)
+    max_positions = int(getattr(params, "max_positions", 10) or 10)
+    max_per_sector = int(getattr(params, "max_per_sector", 0) or 0)
+    rank_mode = str(getattr(params, "rank_mode", "amount") or "amount").lower()
+    entry_mode = str(getattr(params, "entry_mode", "mean_reversion") or "mean_reversion").lower()
+    take_profit_ret = float(getattr(params, "take_profit_ret", 0) or 0)
+    trend_filter = bool(getattr(params, "trend_ma25_rising", False))
+    filter_toggles = _load_filter_toggles()
+    min_enabled = filter_toggles.get("min_amount", True)
+    liq_enabled = filter_toggles.get("liquidity", True)
+    disp_enabled = filter_toggles.get("disparity", True)
+
+    universe_df = pd.read_sql_query("SELECT code, name, market, group_name FROM universe_members", conn)
+    codes = universe_df["code"].dropna().astype(str).tolist()
+    if not codes:
+        data = {"date": None, "stages": [], "candidates": [], "summary": {"total": 0}, "filter_toggles": filter_toggles}
+        _selection_cache.update({"ts": now_ts, "data": data})
+        return data
+
+    _ensure_latest_table(conn)
+    sql = """
+        SELECT l.code, l.date, l.close, l.amount, l.ma25, l.disparity,
+               u.name, u.market, u.group_name
+        FROM daily_price_latest l
+        LEFT JOIN universe_members u ON l.code = u.code
+    """
+    latest = pd.read_sql_query(sql, conn)
+    if latest.empty:
+        data = {"date": None, "stages": [], "candidates": [], "summary": {"total": len(codes)}, "filter_toggles": filter_toggles}
+        _selection_cache.update({"ts": now_ts, "data": data})
+        return data
+
+    total = len(latest)
+    stage_min = latest[latest["amount"] >= min_amount] if min_amount and min_enabled else latest
+    stage_liq = stage_min.sort_values("amount", ascending=False)
+    if liquidity_rank and liq_enabled:
+        stage_liq = stage_liq.head(liquidity_rank)
+
+    def _pass_disparity(row) -> bool:
+        market = row.get("market") or "KOSPI"
+        threshold = buy_kospi if "KOSPI" in market else buy_kosdaq
+        try:
+            disp = float(row.get("disparity") or 0)
+            if entry_mode == "trend_follow":
+                return disp >= threshold
+            return disp <= threshold
+        except Exception:
+            return False
+
+    stage_disp = stage_liq[stage_liq.apply(_pass_disparity, axis=1)] if disp_enabled else stage_liq
+    if disp_enabled and trend_filter:
+        stage_disp = stage_disp
+
+    final = stage_disp.copy()
+    if rank_mode == "disparity":
+        final = final.sort_values("disparity", ascending=True)
+    else:
+        final = final.sort_values("amount", ascending=False)
+    if max_positions:
+        final = final.head(max_positions)
+
+    if max_per_sector and max_per_sector > 0 and "sector_name" in final.columns:
+        trimmed = []
+        counts: Dict[str, int] = {}
+        for _, row in final.iterrows():
+            sector = row.get("sector_name") or "UNKNOWN"
+            if counts.get(sector, 0) >= max_per_sector:
+                continue
+            counts[sector] = counts.get(sector, 0) + 1
+            trimmed.append(row)
+        final = pd.DataFrame(trimmed) if trimmed else final
+
+    def _pack(df: pd.DataFrame, sort_by: str | None = None, ascending: bool = False) -> list[Dict[str, Any]]:
+        if df is None or df.empty:
+            return []
+        if sort_by and sort_by in df.columns:
+            df = df.sort_values(sort_by, ascending=ascending)
+        rows = []
+        for _, row in df.iterrows():
+            rows.append({
+                "code": row.get("code"),
+                "name": row.get("name"),
+                "market": row.get("market"),
+                "amount": _safe_float(row.get("amount")),
+                "close": _safe_float(row.get("close")),
+                "disparity": _safe_float(row.get("disparity")),
+            })
+        return rows
+
+    final_ranked = final.copy()
+    final_ranked["rank"] = range(1, len(final_ranked) + 1)
+    candidates = []
+    for _, row in final_ranked.iterrows():
+        candidates.append({
+            "rank": int(row.get("rank") or 0),
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "market": row.get("market"),
+            "close": _safe_float(row.get("close")),
+            "amount": _safe_float(row.get("amount")),
+            "disparity": _safe_float(row.get("disparity")),
+        })
+
+    stages = [
+        {"key": "universe", "label": "Universe", "count": total, "value": total, "enabled": True},
+        {"key": "min_amount", "label": "Min Amount", "count": len(stage_min), "value": min_amount, "enabled": min_enabled},
+        {"key": "liquidity", "label": "Liquidity", "count": len(stage_liq), "value": liquidity_rank, "enabled": liq_enabled},
+        {"key": "disparity", "label": "Disparity", "count": len(stage_disp), "value": {"kospi": buy_kospi, "kosdaq": buy_kosdaq}, "enabled": disp_enabled},
+        {"key": "final", "label": "Final", "count": len(final), "value": max_positions, "enabled": True},
+    ]
+
+    data = {
+        "date": latest["date"].max(),
+        "stages": stages,
+        "candidates": candidates,
+        "stage_items": {
+            "min_amount": _pack(stage_min),
+            "liquidity": _pack(stage_liq),
+            "disparity": _pack(stage_disp),
+            "final": _pack(final_ranked, sort_by="rank", ascending=True),
+        },
+        "summary": {
+            "total": total,
+            "final": len(final),
+            "trend_filter": trend_filter,
+            "rank_mode": rank_mode,
+            "entry_mode": entry_mode,
+            "max_positions": max_positions,
+            "max_per_sector": max_per_sector,
+        },
+        "filter_toggles": filter_toggles,
+        "pricing": {"sell_rules": {"take_profit_ret": take_profit_ret}},
+    }
+    _maybe_notify_selection(settings, data)
+    _selection_cache.update({"ts": now_ts, "data": data})
+    return data
+
+
+app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="")
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+
+def _start_background_tasks() -> None:
+    if SELECTION_NOTIFY_INTERVAL_SEC <= 0:
+        return
+    thread = threading.Thread(target=_selection_notify_loop, daemon=True)
+    thread.start()
+
+
+_start_background_tasks()
+
+# ---------- Static ----------
+@app.route("/")
+def serve_index():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/bnf")
+def serve_index_bnf():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/<path:path>")
+def serve_static(path: str):
+    if (FRONTEND_DIST / path).exists():
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/bnf/<path:path>")
+def serve_static_bnf(path: str):
+    if (FRONTEND_DIST / path).exists():
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.post("/client_error")
+def client_error():
+    payload = request.get_json(silent=True) or {}
+    CLIENT_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with CLIENT_ERROR_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return jsonify({"status": "ok"})
+
+
+# ---------- API ----------
+@app.get("/universe")
+def universe():
+    """Universe list (KOSPI200 + KOSDAQ150)."""
+    conn = get_conn()
+    sector = request.args.get("sector")
+    if sector:
+        if sector.upper() == "UNKNOWN":
+            where = "s.sector_name IS NULL"
+            params: Tuple[Any, ...] = ()
+        else:
+            where = "s.sector_name = ?"
+            params = (sector,)
+    else:
+        where = "1=1"
+        params = ()
+
+    try:
+        df = pd.read_sql_query(
+            f"""
+            SELECT u.code, u.name, u.market, u.group_name as 'group',
+                   COALESCE(s.sector_name, 'UNKNOWN') AS sector_name,
+                   s.industry_name
+            FROM universe_members u
+            LEFT JOIN sector_map s ON u.code = s.code
+            WHERE {where}
+            ORDER BY u.code
+            """,
+            conn,
+            params=params,
+        )
+    except Exception:
+        df = pd.read_sql_query(
+            "SELECT code, name, market, group_name as 'group' FROM universe_members ORDER BY code",
+            conn,
+        )
+    return jsonify(df.to_dict(orient="records"))
+
+
+@app.get("/sectors")
+def sectors():
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT u.market,
+                   COALESCE(s.sector_name, 'UNKNOWN') AS sector_name,
+                   COUNT(*) AS count
+            FROM universe_members u
+            LEFT JOIN sector_map s ON u.code = s.code
+            GROUP BY u.market, COALESCE(s.sector_name, 'UNKNOWN')
+            ORDER BY u.market, count DESC, sector_name
+            """,
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame([], columns=["market", "sector_name", "count"])
+    return jsonify(df.to_dict(orient="records"))
+
+
+@app.get("/prices")
+def prices():
+    code = request.args.get("code")
+    days = int(request.args.get("days", 180))
+    if not code:
+        return jsonify([])
+
+    conn = get_conn()
+    df = pd.read_sql_query(
+        """
+        SELECT date, open, high, low, close, volume, amount, ma25, disparity
+        FROM daily_price
+        WHERE code=?
+        ORDER BY date DESC
+        LIMIT ?
+        """,
+        conn,
+        params=(code, days),
+    )
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.astype(object).where(pd.notnull(df), None)
+    return jsonify(df.to_dict(orient="records"))
+
+
+@app.get("/signals")
+def signals():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            "SELECT signal_date, code, side, qty FROM order_queue ORDER BY created_at DESC LIMIT 30",
+            conn,
+        )
+        return jsonify(df.to_dict(orient="records"))
+    except Exception:
+        return jsonify([])
+
+
+@app.get("/orders")
+def orders():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    limit = int(request.args.get("limit", 200))
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+              signal_date, exec_date, code, side, qty, status, ord_dvsn, ord_unpr, filled_qty, avg_price, created_at, updated_at
+            FROM order_queue
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(limit,),
+        )
+        return jsonify(df.to_dict(orient="records"))
+    except Exception:
+        return jsonify([])
+
+
+@app.get("/positions")
+def positions():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    portfolio = _build_portfolio(conn)
+    records = portfolio.get("positions") or []
+    slim = [
+        {
+            "code": r.get("code"),
+            "name": r.get("name"),
+            "qty": r.get("qty"),
+            "avg_price": r.get("avg_price"),
+            "entry_date": r.get("entry_date"),
+            "updated_at": r.get("updated_at"),
+        }
+        for r in records
+    ]
+    return jsonify(slim)
+
+
+@app.get("/portfolio")
+def portfolio():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    return jsonify(_build_portfolio(conn))
+
+
+@app.get("/plans")
+def plans():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    settings = load_settings()
+    selection_data = _build_selection_snapshot(conn, settings)
+    return jsonify(_build_plans(conn, selection_data))
+
+
+@app.get("/account")
+def account():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    return jsonify(_build_account_summary(conn))
+
+
+@app.get("/engines")
+def engines():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    conn = get_conn()
+    try:
+        last_signal = conn.execute("SELECT MAX(created_at) FROM order_queue").fetchone()[0]
+    except Exception:
+        last_signal = None
+    pending = _count(conn, "order_queue WHERE status='PENDING'")
+    sent = _count(conn, "order_queue WHERE status='SENT'")
+    done = _count(conn, "order_queue WHERE status='DONE'")
+    monitor_running = _pgrep("src.monitor.monitor_main")
+    return jsonify({
+        "monitor": {"running": monitor_running},
+        "trader": {"last_signal": last_signal, "pending": pending, "sent": sent, "done": done},
+        "accuracy_loader": {"running": False, "pid": None, "progress": {}},
+    })
+
+
+@app.get("/kis_keys")
+def kis_keys():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    rows = list_kis_key_inventory()
+    payload = []
+    for r in rows:
+        payload.append({
+            "id": r.get("id"),
+            "account": r.get("account_no_masked") or r.get("label"),
+            "description": r.get("description"),
+            "enabled": r.get("enabled"),
+        })
+    return jsonify(payload)
+
+
+@app.post("/kis_keys/toggle")
+def kis_keys_toggle():
+    if DISABLE_TRADING_ENDPOINTS:
+        return _disabled_response()
+    payload = request.get_json(silent=True) or {}
+    if not _verify_toggle_password(payload):
+        return jsonify({"error": "invalid_password"}), 403
+    try:
+        idx = int(payload.get("id"))
+    except Exception:
+        return jsonify({"error": "invalid_id"}), 400
+    if idx < 1 or idx > 50:
+        return jsonify({"error": "invalid_id"}), 400
+    enabled = bool(payload.get("enabled"))
+    updated = set_kis_key_enabled(idx, enabled)
+    out = []
+    for r in updated:
+        out.append({
+            "id": r.get("id"),
+            "account": r.get("account_no_masked") or r.get("label"),
+            "description": r.get("description"),
+            "enabled": r.get("enabled"),
+        })
+    return jsonify(out)
+
+
+@app.get("/selection_filters")
+def selection_filters():
+    return jsonify(_load_filter_toggles())
+
+
+@app.post("/selection_filters/toggle")
+def selection_filters_toggle():
+    payload = request.get_json(silent=True) or {}
+    if not _verify_toggle_password(payload):
+        return jsonify({"error": "invalid_password"}), 403
+    key = str(payload.get("key") or "")
+    if key not in FILTER_TOGGLE_KEYS:
+        return jsonify({"error": "invalid_key"}), 400
+    enabled = bool(payload.get("enabled"))
+    toggles = _load_filter_toggles()
+    toggles[key] = enabled
+    _save_filter_toggles(toggles)
+    _selection_cache["ts"] = 0
+    return jsonify(toggles)
+
+
+def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """매수 후보(Selection)만 계산해서 반환한다. (자동매매/잔고 기능 없음)"""
+    params = load_strategy(settings)
+
+    min_amount = float(getattr(params, "min_amount", 0) or 0)
+    liquidity_rank = int(getattr(params, "liquidity_rank", 0) or 0)
+    buy_kospi = float(getattr(params, "buy_kospi", 0) or 0)
+    buy_kosdaq = float(getattr(params, "buy_kosdaq", 0) or 0)
+    max_positions = int(getattr(params, "max_positions", 10) or 10)
+    max_per_sector = int(getattr(params, "max_per_sector", 0) or 0)
+    rank_mode = str(getattr(params, "rank_mode", "amount") or "amount").lower()
+    entry_mode = str(getattr(params, "entry_mode", "mean_reversion") or "mean_reversion").lower()
+    trend_filter = bool(getattr(params, "trend_ma25_rising", False))
+
+    universe_df = pd.read_sql_query("SELECT code, name, market, group_name FROM universe_members", conn)
+    codes = universe_df["code"].dropna().astype(str).tolist()
+    if not codes:
+        return {"date": None, "candidates": [], "summary": {"total": 0, "final": 0}}
+
+    placeholder = ",".join("?" * len(codes))
+    sql = f"""
+        SELECT code, date, close, amount, ma25, disparity
+        FROM (
+            SELECT code, date, close, amount, ma25, disparity,
+                   ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
+            FROM daily_price
+            WHERE code IN ({placeholder})
+        )
+        WHERE rn <= 4
+    """
+    df = pd.read_sql_query(sql, conn, params=codes)
+    if df.empty:
+        return {"date": None, "candidates": [], "summary": {"total": len(codes), "final": 0}}
+
+    df = df.sort_values(["code", "date"])
+    df["ma25_prev"] = df.groupby("code")["ma25"].shift(1)
+    df["ret3"] = df.groupby("code")["close"].pct_change(3)
+    latest = df.groupby("code").tail(1).copy()
+    latest = latest.merge(universe_df, on="code", how="left")
+
+    total = len(latest)
+
+    stage = latest
+    if min_amount:
+        stage = stage[stage["amount"] >= min_amount]
+
+    stage = stage.sort_values("amount", ascending=False)
+    if liquidity_rank:
+        stage = stage.head(liquidity_rank)
+
+    def pass_signal(row) -> bool:
+        market = str(row.get("market") or "").upper()
+        threshold = buy_kospi if "KOSPI" in market else buy_kosdaq
+        try:
+            disp = float(row.get("disparity") or 0)
+            r3 = float(row.get("ret3") or 0)
+        except Exception:
+            return False
+
+        if entry_mode == "trend_follow":
+            return disp >= threshold and r3 >= 0
+        return disp <= threshold
+
+    stage = stage[stage.apply(pass_signal, axis=1)]
+    if trend_filter:
+        stage = stage[stage["ma25_prev"].notna() & (stage["ma25"] > stage["ma25_prev"])]
+
+    ranked = stage.copy()
+    if rank_mode == "score":
+        if entry_mode == "trend_follow":
+            ranked["score"] = (
+                (ranked["disparity"].fillna(0).astype(float))
+                + (0.8 * (ranked["ret3"].fillna(0).astype(float)))
+                + (0.05 * np.log1p(ranked["amount"].fillna(0).astype(float).clip(lower=0)))
+            )
+        else:
+            ranked["score"] = (
+                (-ranked["disparity"].fillna(0).astype(float))
+                + (0.8 * (-ranked["ret3"].fillna(0).astype(float)))
+                + (0.05 * np.log1p(ranked["amount"].fillna(0).astype(float).clip(lower=0)))
+            )
+        ranked = ranked.sort_values("score", ascending=False)
+    else:
+        ranked = ranked.sort_values("amount", ascending=False)
+
+    final_rows = []
+    sector_counts: Dict[str, int] = {}
+    for _, row in ranked.iterrows():
+        sec = row.get("group_name") or "UNKNOWN"
+        if max_per_sector and sector_counts.get(sec, 0) >= max_per_sector:
+            continue
+        final_rows.append(row)
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        if len(final_rows) >= max_positions:
+            break
+
+    final = pd.DataFrame(final_rows) if final_rows else ranked.head(0).copy()
+    if not final.empty:
+        final["rank"] = range(1, len(final) + 1)
+
+    try:
+        sector_df = pd.read_sql_query("SELECT code, sector_name, industry_name FROM sector_map", conn)
+        final = final.merge(sector_df, on="code", how="left")
+    except Exception:
+        pass
+
+    latest_date = latest["date"].max()
+    cols = ["code", "name", "market", "amount", "close", "disparity", "rank", "sector_name", "industry_name"]
+    for c in cols:
+        if c not in final.columns:
+            final[c] = None
+    candidates = (
+        final[cols]
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna("")
+        .to_dict(orient="records")
+    )
+
+    return {
+        "date": latest_date,
+        "candidates": candidates,
+        "summary": {
+            "total": int(total),
+            "final": int(len(candidates)),
+            "entry_mode": entry_mode,
+            "rank_mode": rank_mode,
+            "liquidity_rank": liquidity_rank,
+            "min_amount": min_amount,
+            "buy_thresholds": {"kospi": buy_kospi, "kosdaq": buy_kosdaq},
+            "trend_filter": trend_filter,
+            "max_positions": max_positions,
+            "max_per_sector": max_per_sector,
+        },
+    }
+
+
+@app.get("/selection")
+def selection():
+    conn = get_conn()
+    settings = load_settings()
+    return jsonify(_build_selection_snapshot(conn, settings))
+
+
+@app.get("/status")
+def status():
+    conn = get_conn()
+    out = {
+        "universe": {"total": _count(conn, "universe_members")},
+        "daily_price": {
+            "rows": _count(conn, "daily_price"),
+            "codes": _distinct_code_count(conn, "daily_price"),
+            "missing_codes": _missing_codes(conn, "daily_price"),
+            "date": _minmax(conn, "daily_price"),
+        },
+        "jobs": {"recent": _count(conn, "job_runs")},
+    }
+    return jsonify(out)
+
+
+@app.get("/jobs")
+def jobs():
+    conn = get_conn()
+    limit = int(request.args.get("limit", 20))
+    df = pd.read_sql_query("SELECT * FROM job_runs ORDER BY started_at DESC LIMIT ?", conn, params=(limit,))
+    return jsonify(df.to_dict(orient="records"))
+
+
+@app.get("/strategy")
+def strategy():
+    settings = load_settings()
+    params = load_strategy(settings)
+    return jsonify(
+        {
+            "entry_mode": params.entry_mode,
+            "liquidity_rank": params.liquidity_rank,
+            "min_amount": params.min_amount,
+            "rank_mode": params.rank_mode,
+            "disparity_buy_kospi": params.buy_kospi,
+            "disparity_buy_kosdaq": params.buy_kosdaq,
+            "disparity_sell": params.sell_disparity,
+            "take_profit_ret": params.take_profit_ret,
+            "stop_loss": params.stop_loss,
+            "max_holding_days": params.max_holding_days,
+            "max_positions": params.max_positions,
+            "max_per_sector": params.max_per_sector,
+            "trend_ma25_rising": params.trend_ma25_rising,
+            "selection_horizon_days": params.selection_horizon_days,
+        }
+    )
+
+
+@app.post("/export")
+def export_csv():
+    settings = load_settings()
+    maybe_export_db(settings, str(DB_PATH))
+    return jsonify({"status": "success", "message": "CSV export completed"})
+
+
+if __name__ == "__main__":
+    host = os.getenv("BNF_VIEWER_HOST", "0.0.0.0")
+    port = int(os.getenv("BNF_VIEWER_PORT", "5001"))
+    app.run(host=host, port=port)

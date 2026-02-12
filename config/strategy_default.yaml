@@ -1,0 +1,14 @@
+entry_mode: mean_reversion
+liquidity_rank: 300
+min_amount: 50000000000
+rank_mode: amount
+buy:
+  kospi_disparity: -0.05
+  kosdaq_disparity: -0.10
+sell:
+  take_profit_disparity: -0.01
+  take_profit_ret: 0.0
+  stop_loss: -0.05
+  max_holding_days: 3
+position:
+  max_positions: 10

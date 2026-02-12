@@ -1,0 +1,25 @@
+entry_mode: mean_reversion
+liquidity_rank: 50
+min_amount: 5000000
+
+# 종목 선별 랭킹 방식
+# - amount: 거래대금(amount) 우선 (기본)
+# - score : mean_reversion(과매도+투매) / trend_follow(모멘텀+유동성) 스코어링
+rank_mode: amount
+buy:
+  kospi_disparity: -0.05
+  kosdaq_disparity: -0.25
+  trend_filter:
+    ma25_rising: true
+sell:
+  take_profit_disparity: 0.0
+  take_profit_ret: 0.005
+  stop_loss: -0.10
+  max_holding_days: 10
+position:
+  max_positions: 3
+  max_per_sector: 3
+  initial_cash: 10000000
+  capital_utilization: 1.0
+report:
+  selection_horizon_days: 1

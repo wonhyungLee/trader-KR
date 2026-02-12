@@ -1,0 +1,6 @@
+# BEGIN BNF-K DATA
+CRON_TZ=Asia/Seoul
+35 15 * * 1-5 /home/ubuntu/종목선별매매프로그램/scripts/run_daily_incremental.sh >> /home/ubuntu/종목선별매매프로그램/logs/daily_loader.log 2>&1
+10 02 * * 1-5 /home/ubuntu/종목선별매매프로그램/scripts/run_accuracy_resume.sh >> /home/ubuntu/종목선별매매프로그램/logs/accuracy_loader.log 2>&1
+30 02 * * 6 /home/ubuntu/종목선별매매프로그램/scripts/run_refill_kis.sh >> /home/ubuntu/종목선별매매프로그램/logs/refill_kis.log 2>&1
+# END BNF-K DATA
