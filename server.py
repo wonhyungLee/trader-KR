@@ -244,7 +244,10 @@ def _safe_float(value: Any) -> Optional[float]:
     try:
         if isinstance(value, str):
             value = value.replace(",", "").strip()
-        return float(value)
+        num = float(value)
+        if num != num or num in (float("inf"), float("-inf")):
+            return None
+        return num
     except Exception:
         return None
 
@@ -452,18 +455,28 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
         _selection_cache.update({"ts": now_ts, "data": data})
         return data
 
-    _ensure_latest_table(conn)
-    sql = """
-        SELECT l.code, l.date, l.close, l.amount, l.ma25, l.disparity,
-               u.name, u.market, u.group_name
-        FROM daily_price_latest l
-        LEFT JOIN universe_members u ON l.code = u.code
+    placeholder = ",".join("?" * len(codes))
+    sql = f"""
+        SELECT code, date, close, amount, ma25, disparity
+        FROM (
+            SELECT code, date, close, amount, ma25, disparity,
+                   ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
+            FROM daily_price
+            WHERE code IN ({placeholder})
+        )
+        WHERE rn <= 4
     """
-    latest = pd.read_sql_query(sql, conn)
-    if latest.empty:
+    df = pd.read_sql_query(sql, conn, params=codes)
+    if df.empty:
         data = {"date": None, "stages": [], "candidates": [], "summary": {"total": len(codes)}, "filter_toggles": filter_toggles}
         _selection_cache.update({"ts": now_ts, "data": data})
         return data
+
+    df = df.sort_values(["code", "date"])
+    df["ma25_prev"] = df.groupby("code")["ma25"].shift(1)
+    df["ret3"] = df.groupby("code")["close"].pct_change(3)
+    latest = df.groupby("code").tail(1).copy()
+    latest = latest.merge(universe_df, on="code", how="left")
 
     total = len(latest)
     stage_min = latest[latest["amount"] >= min_amount] if min_amount and min_enabled else latest
@@ -477,39 +490,60 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
         try:
             disp = float(row.get("disparity") or 0)
             if entry_mode == "trend_follow":
-                return disp >= threshold
+                r3 = float(row.get("ret3") or 0)
+                return disp >= threshold and r3 >= 0
             return disp <= threshold
         except Exception:
             return False
 
     stage_disp = stage_liq[stage_liq.apply(_pass_disparity, axis=1)] if disp_enabled else stage_liq
     if disp_enabled and trend_filter:
-        stage_disp = stage_disp
+        stage_disp = stage_disp[stage_disp["ma25_prev"].notna() & (stage_disp["ma25"] > stage_disp["ma25_prev"])]
 
-    final = stage_disp.copy()
-    if rank_mode == "disparity":
-        final = final.sort_values("disparity", ascending=True)
+    stage_ranked = stage_disp.copy()
+    if rank_mode == "score":
+        if entry_mode == "trend_follow":
+            stage_ranked["score"] = (
+                (stage_ranked["disparity"].fillna(0).astype(float))
+                + (0.8 * (stage_ranked["ret3"].fillna(0).astype(float)))
+                + (0.05 * np.log1p(stage_ranked["amount"].fillna(0).astype(float).clip(lower=0)))
+            )
+        else:
+            stage_ranked["score"] = (
+                (-stage_ranked["disparity"].fillna(0).astype(float))
+                + (0.8 * (-stage_ranked["ret3"].fillna(0).astype(float)))
+                + (0.05 * np.log1p(stage_ranked["amount"].fillna(0).astype(float).clip(lower=0)))
+            )
+        stage_ranked = stage_ranked.sort_values("score", ascending=False)
     else:
-        final = final.sort_values("amount", ascending=False)
-    if max_positions:
-        final = final.head(max_positions)
+        stage_ranked = stage_ranked.sort_values("amount", ascending=False)
 
-    if max_per_sector and max_per_sector > 0 and "sector_name" in final.columns:
-        trimmed = []
-        counts: Dict[str, int] = {}
-        for _, row in final.iterrows():
-            sector = row.get("sector_name") or "UNKNOWN"
-            if counts.get(sector, 0) >= max_per_sector:
-                continue
-            counts[sector] = counts.get(sector, 0) + 1
-            trimmed.append(row)
-        final = pd.DataFrame(trimmed) if trimmed else final
+    final_rows = []
+    sector_counts: Dict[str, int] = {}
+    for _, row in stage_ranked.iterrows():
+        sec = row.get("group_name") or "UNKNOWN"
+        if max_per_sector and max_per_sector > 0 and sector_counts.get(sec, 0) >= max_per_sector:
+            continue
+        final_rows.append(row)
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        if len(final_rows) >= max_positions:
+            break
+    final = pd.DataFrame(final_rows) if final_rows else stage_ranked.head(0).copy()
+    if not final.empty:
+        final["rank"] = range(1, len(final) + 1)
+
+    try:
+        sector_df = pd.read_sql_query("SELECT code, sector_name, industry_name FROM sector_map", conn)
+        final = final.merge(sector_df, on="code", how="left")
+    except Exception:
+        pass
 
     def _pack(df: pd.DataFrame, sort_by: str | None = None, ascending: bool = False) -> list[Dict[str, Any]]:
         if df is None or df.empty:
             return []
         if sort_by and sort_by in df.columns:
             df = df.sort_values(sort_by, ascending=ascending)
+        df = df.replace([np.inf, -np.inf], np.nan)
         rows = []
         for _, row in df.iterrows():
             rows.append({
@@ -522,10 +556,8 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
             })
         return rows
 
-    final_ranked = final.copy()
-    final_ranked["rank"] = range(1, len(final_ranked) + 1)
     candidates = []
-    for _, row in final_ranked.iterrows():
+    for _, row in final.iterrows():
         candidates.append({
             "rank": int(row.get("rank") or 0),
             "code": row.get("code"),
@@ -534,14 +566,16 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
             "close": _safe_float(row.get("close")),
             "amount": _safe_float(row.get("amount")),
             "disparity": _safe_float(row.get("disparity")),
+            "sector_name": row.get("sector_name"),
+            "industry_name": row.get("industry_name"),
         })
 
     stages = [
-        {"key": "universe", "label": "Universe", "count": total, "value": total, "enabled": True},
-        {"key": "min_amount", "label": "Min Amount", "count": len(stage_min), "value": min_amount, "enabled": min_enabled},
-        {"key": "liquidity", "label": "Liquidity", "count": len(stage_liq), "value": liquidity_rank, "enabled": liq_enabled},
-        {"key": "disparity", "label": "Disparity", "count": len(stage_disp), "value": {"kospi": buy_kospi, "kosdaq": buy_kosdaq}, "enabled": disp_enabled},
-        {"key": "final", "label": "Final", "count": len(final), "value": max_positions, "enabled": True},
+        {"key": "universe", "label": "Universe", "count": total, "value": len(codes), "enabled": True},
+        {"key": "min_amount", "label": "Amount Filter", "count": len(stage_min), "value": min_amount, "enabled": min_enabled},
+        {"key": "liquidity", "label": "Liquidity Rank", "count": len(stage_liq), "value": liquidity_rank, "enabled": liq_enabled},
+        {"key": "disparity", "label": "Disparity Threshold", "count": len(stage_disp), "value": {"kospi": buy_kospi, "kosdaq": buy_kosdaq}, "enabled": disp_enabled},
+        {"key": "final", "label": "Max Positions", "count": len(final), "value": max_positions, "enabled": True},
     ]
 
     data = {
@@ -552,7 +586,7 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
             "min_amount": _pack(stage_min),
             "liquidity": _pack(stage_liq),
             "disparity": _pack(stage_disp),
-            "final": _pack(final_ranked, sort_by="rank", ascending=True),
+            "final": _pack(final, sort_by="rank", ascending=True),
         },
         "summary": {
             "total": total,
@@ -566,6 +600,11 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
         "filter_toggles": filter_toggles,
         "pricing": {"sell_rules": {"take_profit_ret": take_profit_ret}},
     }
+    # Ensure JSON-safe values (no NaN/Inf)
+    try:
+        data = json.loads(json.dumps(data, allow_nan=False))
+    except Exception:
+        pass
     _maybe_notify_selection(settings, data)
     _selection_cache.update({"ts": now_ts, "data": data})
     return data

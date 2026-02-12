@@ -1,4 +1,4 @@
-env: "paper"
+env: "prod"
 site_url: "http://trader.r-e.kr"
 
 # 자동매매/주문/잔고 기능은 제거된 "조회 전용" 서버입니다.
@@ -11,7 +11,7 @@ discord:
   webhook: "${DISCORD_WEBHOOK_URL}"
 
 kis:
-  env: "paper"
+  env: "prod"
   base_url_prod: "https://openapi.koreainvestment.com:9443"
   base_url_paper: "https://openapivts.koreainvestment.com:29443"
   ws_url_prod: "ws://ops.koreainvestment.com:21000"
