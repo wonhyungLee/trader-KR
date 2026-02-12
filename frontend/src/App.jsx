@@ -73,7 +73,7 @@ function App() {
   const [selection, setSelection] = useState({ stages: [], candidates: [], pricing: {} })
   const [status, setStatus] = useState(null)
 
-  const [filter, setFilter] = useState('KOSPI200')
+  const [filter, setFilter] = useState('ALL')
   const [sectorFilter, setSectorFilter] = useState('ALL')
   const [search, setSearch] = useState('')
   const [lastUpdated, setLastUpdated] = useState(null)
@@ -148,7 +148,7 @@ function App() {
     ? lastUpdated.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
     : '-'
 
-  const marketFilter = filter === 'KOSPI200' ? 'KOSPI' : 'KOSDAQ'
+  const marketFilter = filter === 'ALL' ? 'ALL' : filter === 'KOSPI200' ? 'KOSPI' : 'KOSDAQ'
   const sectorOptions = useMemo(() => {
     const list = asArray(sectors)
     if (marketFilter === 'ALL') return list
@@ -354,6 +354,7 @@ function App() {
         </div>
         <div className="controls">
           <div className="segmented">
+            <button className={filter === 'ALL' ? 'active' : ''} onClick={() => setFilter('ALL')}>ALL 350</button>
             <button className={filter === 'KOSPI200' ? 'active' : ''} onClick={() => setFilter('KOSPI200')}>KOSPI 200</button>
             <button className={filter === 'KOSDAQ150' ? 'active' : ''} onClick={() => setFilter('KOSDAQ150')}>KOSDAQ 150</button>
           </div>
