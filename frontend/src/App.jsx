@@ -1110,23 +1110,43 @@ function App() {
 		            </div>
 
             <div className="chart-grid">
-              <div className="chart-summary">
-	                <div>
-	                  <div className="chart-title">Last Close</div>
-	                  <div className="delta-value" style={{ opacity: 0.8, fontSize: '16px' }}>{formatCurrency(prev?.close)}</div>
-	                  <div className="delta-sub">{prev?.date || '-'}</div>
-	                </div>
-	                <div>
-	                  <div className="chart-title" style={{ color: 'var(--accent-2)' }}>Current Price</div>
-	                  <div className="delta-value">{formatCurrency(livePrice)}</div>
-	                  <div className="delta-sub">{latest?.date || '-'}</div>
-	                </div>
-	                <div className="delta">
-	                  <div className="chart-title">Change</div>
-	                  <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>
-	                  <div className="delta-sub">{deltaPct === null ? '-' : formatPct(deltaPct)}</div>
-	                </div>
-	              </div>
+              {isMobile ? (
+                <div className="chart-summary-mobile">
+                  <div className="chart-summary-mobile__top">
+                    <div className="chart-summary-mobile__kpi">
+                      <div className="chart-title">현재가</div>
+                      <div className="chart-summary-mobile__price">{formatCurrency(livePrice)}</div>
+                    </div>
+                    <div className={`chart-summary-mobile__pill ${delta >= 0 ? 'up' : 'down'}`}>
+                      {delta >= 0 ? '+' : ''}
+                      {formatCurrency(delta)}
+                      {deltaPct === null ? '' : ` (${formatPct(deltaPct)})`}
+                    </div>
+                  </div>
+                  <div className="chart-summary-mobile__meta">
+                    <span>전일종가 {formatCurrency(prev?.close)}</span>
+                    <span className="mono">{prev?.date || '-'}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="chart-summary">
+                  <div>
+                    <div className="chart-title">전일 종가</div>
+                    <div className="delta-value" style={{ opacity: 0.8, fontSize: '16px' }}>{formatCurrency(prev?.close)}</div>
+                    <div className="delta-sub">{prev?.date || '-'}</div>
+                  </div>
+                  <div>
+                    <div className="chart-title" style={{ color: 'var(--accent-2)' }}>현재가</div>
+                    <div className="delta-value">{formatCurrency(livePrice)}</div>
+                    <div className="delta-sub">{latest?.date || '-'}</div>
+                  </div>
+                  <div className="delta">
+                    <div className="chart-title">변동</div>
+                    <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>
+                    <div className="delta-sub">{deltaPct === null ? '-' : formatPct(deltaPct)}</div>
+                  </div>
+                </div>
+              )}
 
               <div className="chart-card chart-zoom" ref={chartWheelRef}>
                 <div className="chart-title">Price · MA25 · Volume</div>

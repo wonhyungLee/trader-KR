@@ -57,7 +57,9 @@ _selection_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 SELECTION_NOTIFY_PATH = Path("data/selection_notify_state.json")
 SELECTION_NOTIFY_COOLDOWN_SEC = int(os.getenv("SELECTION_NOTIFY_COOLDOWN_SEC", "300"))
 SELECTION_NOTIFY_INTERVAL_SEC = int(os.getenv("SELECTION_NOTIFY_INTERVAL_SEC", "60"))
-SELECTION_NOTIFY_REPEAT_SEC = int(os.getenv("SELECTION_NOTIFY_REPEAT_SEC", "3600"))
+# If there are no new candidates, re-recommend the last sent ones at this interval.
+# Default: 6 hours (can be overridden by env).
+SELECTION_NOTIFY_REPEAT_SEC = int(os.getenv("SELECTION_NOTIFY_REPEAT_SEC", "21600"))
 _selection_notify_health: Dict[str, Any] = {"last_error": None, "last_error_ts": 0.0, "last_ok_ts": 0.0}
 DISABLE_TRADING_ENDPOINTS = True
 _kis_price_client: Optional[KISPriceClient] = None

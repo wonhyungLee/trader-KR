@@ -19,4 +19,4 @@ if [ -n "${WATCHDOG_INTERVAL_SEC:-}" ]; then
   INTERVAL_ARG=(--interval "$WATCHDOG_INTERVAL_SEC")
 fi
 
-$PYBIN -u -m src.utils.data_watchdog "${INTERVAL_ARG[@]}"
+$PYBIN -u -m src.utils.data_watchdog "${INTERVAL_ARG[@]}" "$@"
