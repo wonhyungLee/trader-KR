@@ -62,6 +62,9 @@ function App() {
   const [sectors, setSectors] = useState([])
   const [selection, setSelection] = useState({ stages: [], candidates: [], pricing: {} })
   const [isSelectionLoading, setIsSelectionLoading] = useState(false)
+  const [selectionLoadingProgress, setSelectionLoadingProgress] = useState(0)
+  const selectionLoadingTimerRef = useRef(null)
+  const selectionLoadingDoneTimerRef = useRef(null)
 
   const [filter, setFilter] = useState('ALL')
   const [sectorFilter, setSectorFilter] = useState('ALL')
@@ -86,10 +89,57 @@ function App() {
   const [updateKey, setUpdateKey] = useState(0)
   const prevCandidatesRef = useRef([])
 
+  const startSelectionLoadingProgress = useCallback(() => {
+    if (selectionLoadingTimerRef.current) {
+      clearInterval(selectionLoadingTimerRef.current)
+      selectionLoadingTimerRef.current = null
+    }
+    if (selectionLoadingDoneTimerRef.current) {
+      clearTimeout(selectionLoadingDoneTimerRef.current)
+      selectionLoadingDoneTimerRef.current = null
+    }
+
+    setSelectionLoadingProgress(0)
+    const rampMs = 14000
+    const startedAt = Date.now()
+
+    selectionLoadingTimerRef.current = setInterval(() => {
+      const elapsed = Date.now() - startedAt
+      setSelectionLoadingProgress((prev) => {
+        const next = Math.min(95, Math.floor((elapsed / rampMs) * 95))
+        return next > prev ? next : prev
+      })
+      if (elapsed >= rampMs) {
+        clearInterval(selectionLoadingTimerRef.current)
+        selectionLoadingTimerRef.current = null
+      }
+    }, 120)
+  }, [])
+
+  const stopSelectionLoadingProgress = useCallback(() => {
+    if (selectionLoadingTimerRef.current) {
+      clearInterval(selectionLoadingTimerRef.current)
+      selectionLoadingTimerRef.current = null
+    }
+    if (selectionLoadingDoneTimerRef.current) {
+      clearTimeout(selectionLoadingDoneTimerRef.current)
+      selectionLoadingDoneTimerRef.current = null
+    }
+
+    setSelectionLoadingProgress(100)
+    selectionLoadingDoneTimerRef.current = setTimeout(() => {
+      setSelectionLoadingProgress(0)
+      setIsSelectionLoading(false)
+    }, 500)
+  }, [])
+
   const loadData = useCallback(async () => {
     const sector = sectorFilter !== 'ALL' ? sectorFilter : undefined
     const isInitial = prevCandidatesRef.current.length === 0
-    if (isInitial) setIsSelectionLoading(true)
+    if (isInitial) {
+      setIsSelectionLoading(true)
+      startSelectionLoadingProgress()
+    }
 
     const tasks = []
 
@@ -130,7 +180,6 @@ function App() {
           }
         })
         .catch(() => {})
-        .finally(() => setIsSelectionLoading(false))
     )
     tasks.push(
       fetchSelectionFilters()
@@ -146,8 +195,9 @@ function App() {
     )
 
     await Promise.allSettled(tasks)
+    if (isInitial) stopSelectionLoadingProgress()
     setLastUpdated(new Date())
-  }, [sectorFilter])
+  }, [sectorFilter, startSelectionLoadingProgress, stopSelectionLoadingProgress])
 
   useEffect(() => {
     loadData()
@@ -188,6 +238,15 @@ function App() {
       document.body.style.overflow = ''
     }
   }, [modalOpen])
+
+  useEffect(() => () => {
+    if (selectionLoadingTimerRef.current) {
+      clearInterval(selectionLoadingTimerRef.current)
+    }
+    if (selectionLoadingDoneTimerRef.current) {
+      clearTimeout(selectionLoadingDoneTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (!modalOpen) setZoomArmed(false)
@@ -505,8 +564,11 @@ function App() {
             </div>
             {isSelectionLoading && (!selection || selection.candidates.length === 0) ? (
               <div className="loading-container">
-                <div className="loading-spinner"></div>
                 <p>종목 분석 데이터를 불러오는 중입니다...</p>
+                <div className="loading-gauge-track" aria-hidden="true">
+                  <div className="loading-gauge-fill" style={{ width: `${selectionLoadingProgress}%` }} />
+                </div>
+                <p className="loading-gauge-text">{selectionLoadingProgress}%</p>
               </div>
             ) : (
               <div key={updateKey} className={updateKey > 0 ? "animate-update" : ""}>
