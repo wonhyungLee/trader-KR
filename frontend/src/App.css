@@ -1464,16 +1464,91 @@ body {
   animation: highlight-fade 0.6s ease-out; 
 }
 
-/* Coupang Partners Banner */
-.affiliate-panel {
-  margin-bottom: 18px;
+/* Coupang Partners Popup */
+.ad-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 9, 13, 0.82);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 80;
+  padding: 24px;
 }
 
-.affiliate-head {
+.ad-modal {
+  width: min(980px, 96vw);
+  max-height: 92vh;
+  border-radius: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: radial-gradient(800px 400px at 10% 0%, rgba(249, 115, 22, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(56, 189, 248, 0.18), transparent 70%),
+    rgba(10, 16, 24, 0.98);
+  box-shadow: 0 40px 90px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  animation: adPop 0.18s ease-out;
+}
+
+@keyframes adPop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.ad-modal-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.ad-modal-title {
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.ad-modal-sub {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ad-modal-body {
+  padding: 18px;
+  max-height: calc(92vh - 60px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ad-modal-close {
+  border: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.75);
+  color: var(--muted);
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  text-decoration: none;
+  flex: none;
+}
+
+.ad-modal-close:hover {
+  color: var(--text);
+  border-color: rgba(56, 189, 248, 0.35);
 }
 
 .ad-badge {
@@ -1491,27 +1566,6 @@ body {
   text-transform: uppercase;
   margin-left: 8px;
   vertical-align: middle;
-}
-
-.close-ad-btn {
-  border: 1px solid var(--line);
-  background: rgba(15, 23, 42, 0.75);
-  color: var(--muted);
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  line-height: 1;
-  flex: none;
-}
-
-.close-ad-btn:hover {
-  color: var(--text);
-  border-color: rgba(56, 189, 248, 0.35);
 }
 
 .affiliate-disclosure {

@@ -97,6 +97,7 @@ function App() {
   const [showCoupangBanner, setShowCoupangBanner] = useState(false)
   const [coupangBannerLoading, setCoupangBannerLoading] = useState(false)
   const [coupangBanner, setCoupangBanner] = useState(null)
+  const coupangBannerReshowTimerRef = useRef(null)
 
   const hideCoupangBanner = useCallback(() => {
     const hideUntil = Date.now() + COUPANG_BANNER_HIDE_MS
@@ -119,10 +120,42 @@ function App() {
     setShowCoupangBanner(true)
   }, [])
 
+  // If user stays on the site, re-show after 6h cooldown passes.
+  useEffect(() => {
+    if (showCoupangBanner) return
+    if (coupangBannerReshowTimerRef.current) {
+      clearTimeout(coupangBannerReshowTimerRef.current)
+      coupangBannerReshowTimerRef.current = null
+    }
+    let hideUntil = 0
+    try {
+      hideUntil = Number(localStorage.getItem(COUPANG_BANNER_HIDE_KEY) || '0')
+    } catch {
+      hideUntil = 0
+    }
+    if (!hideUntil) return
+    const delay = hideUntil - Date.now()
+    if (delay <= 0) {
+      setShowCoupangBanner(true)
+      return
+    }
+    coupangBannerReshowTimerRef.current = setTimeout(() => {
+      coupangBannerReshowTimerRef.current = null
+      setShowCoupangBanner(true)
+    }, delay)
+    return () => {
+      if (coupangBannerReshowTimerRef.current) {
+        clearTimeout(coupangBannerReshowTimerRef.current)
+        coupangBannerReshowTimerRef.current = null
+      }
+    }
+  }, [showCoupangBanner])
+
   useEffect(() => {
     if (!showCoupangBanner) return
     let cancelled = false
     setCoupangBannerLoading(true)
+    setCoupangBanner(null)
     fetchCoupangBanner({ limit: 3 })
       .then((payload) => {
         if (cancelled) return
@@ -140,6 +173,9 @@ function App() {
       cancelled = true
     }
   }, [showCoupangBanner])
+
+  const coupangItems = useMemo(() => asArray(coupangBanner?.items), [coupangBanner])
+  const coupangPrimaryLink = coupangItems.length ? (coupangItems[0]?.link || '') : ''
 
   const startSelectionLoadingProgress = useCallback(() => {
     if (selectionLoadingTimerRef.current) {
@@ -267,29 +303,33 @@ function App() {
 
   const candidates = useMemo(() => asArray(selection?.candidates), [selection])
   const candidateCodesKey = useMemo(() => candidates.map((c) => c?.code).filter(Boolean).join(','), [candidates])
-  const isSelectedCandidate = useMemo(() => {
-    if (!selected) return false
+  const selectedWsLivePrice = useMemo(() => {
+    if (!selected) return null
     const code = String(selected.code || '')
-    return candidates.some((c) => String(c?.code || '') === code)
-  }, [selected, candidates])
+    const wsLive = candidateLivePrices?.[code]?.price
+    return wsLive === null || wsLive === undefined ? null : wsLive
+  }, [selected, candidateLivePrices])
 
-  // 실시간 가격은 팝업이 열려 있을 때만 1분 주기로 갱신
+  // 실시간 가격은 팝업이 열려 있을 때만 1분 주기로 갱신(후보는 WS 캐시가 있으면 그 값을 우선 사용)
   useEffect(() => {
     if (!selected || !modalOpen) return
-    if (!isSelectedCandidate) return
-    const code = String(selected.code || '')
-    if (code && candidateLivePrices?.[code]?.price !== null && candidateLivePrices?.[code]?.price !== undefined) return
+    if (selectedWsLivePrice !== null) return
+    let cancelled = false
     const poll = () => {
       fetchRealtimePrice(selected.code).then(data => {
+        if (cancelled) return
         if (data && data.price !== null && data.price !== undefined) setRealtimePrice(data.price)
       }).catch(() => {})
     }
     poll()
     const id = setInterval(poll, 60000)
-    return () => clearInterval(id)
-  }, [selected, modalOpen, isSelectedCandidate, candidateLivePrices])
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [selected, modalOpen, selectedWsLivePrice])
 
-  // 후보 종목만 실시간 가격을 갱신한다(WS -> 서버 캐시). 비후보는 current price 표시/요청을 하지 않는다.
+  // 후보 종목 테이블용 실시간 가격(WS -> 서버 캐시).
   useEffect(() => {
     const codes = candidateCodesKey ? candidateCodesKey.split(',').filter(Boolean) : []
     if (!codes.length) {
@@ -321,11 +361,11 @@ function App() {
   }, [filter, sectorFilter])
 
   useEffect(() => {
-    document.body.style.overflow = modalOpen ? 'hidden' : ''
+    document.body.style.overflow = modalOpen || showCoupangBanner ? 'hidden' : ''
     return () => {
       document.body.style.overflow = ''
     }
-  }, [modalOpen])
+  }, [modalOpen, showCoupangBanner])
 
   useEffect(() => () => {
     if (selectionLoadingTimerRef.current) {
@@ -602,74 +642,11 @@ function App() {
             <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
           </div>
         </div>
-      </header>
+	      </header>
 
-      {showCoupangBanner ? (
-        <section className="panel section affiliate-panel" aria-label="쿠팡 파트너스 배너 광고">
-          <div className="section-head affiliate-head">
-            <div>
-              <h2>
-                {coupangBanner?.theme?.title || '생필품 추천'} <span className="ad-badge">AD</span>
-              </h2>
-              <p>{coupangBanner?.theme?.tagline || '오늘 필요한 생활템을 모아봤습니다.'}</p>
-            </div>
-            <button type="button" className="close-ad-btn" onClick={hideCoupangBanner} aria-label="배너 닫기">
-              ×
-            </button>
-          </div>
-
-          <div className="cpb-grid" id="coupang-banner">
-            {coupangBannerLoading ? (
-              Array.from({ length: 3 }).map((_, idx) => (
-                <div key={`cp-skeleton-${idx}`} className="cpb-card cpb-card--skeleton">
-                  <div className="cpb-thumb" />
-                  <div className="cpb-lines">
-                    <span />
-                    <span />
-                  </div>
-                </div>
-              ))
-            ) : (
-              asArray(coupangBanner?.items).slice(0, 6).map((item, idx) => (
-                <a
-                  key={`cp-item-${idx}-${item?.link || ''}`}
-                  className="cpb-card"
-                  href={item?.link}
-                  target="_blank"
-                  rel="noreferrer"
-                  onMouseDown={hideCoupangBanner}
-                >
-                  <img src={item?.image} alt={item?.title || ''} loading="lazy" />
-                  <div className="cpb-info">
-                    <div className="cpb-tags">
-                      {item?.badge ? <span className="cpb-badge">{item.badge}</span> : null}
-                      {item?.discountRate ? <span className="cpb-pill">{item.discountRate}%↓</span> : null}
-                      {item?.shippingTag ? (
-                        <span className="cpb-pill cpb-pill--soft">{item.shippingTag}</span>
-                      ) : null}
-                    </div>
-                    <div className="cpb-title">{item?.title}</div>
-                    {item?.price ? <div className="cpb-price">{item.price}</div> : null}
-                    {item?.meta ? <div className="cpb-meta">{item.meta}</div> : null}
-                    <div className="cpb-cta">{item?.cta || coupangBanner?.theme?.cta || '바로 보기'}</div>
-                  </div>
-                </a>
-              ))
-            )}
-            {!coupangBannerLoading && asArray(coupangBanner?.items).length === 0 ? (
-              <div className="cpb-empty">추천 상품을 불러오지 못했습니다.</div>
-            ) : null}
-          </div>
-
-          <p className="affiliate-disclosure">
-            이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
-          </p>
-        </section>
-      ) : null}
-
-      <main className="layout">
-        <aside id="stocks" className={`panel stock-panel ${isStockPanelOpen ? 'open' : ''}`}>
-          <div className="panel-head">
+	      <main className="layout">
+	        <aside id="stocks" className={`panel stock-panel ${isStockPanelOpen ? 'open' : ''}`}>
+	          <div className="panel-head">
             <div>
               <h2>주식목록</h2>
               <p>{filtered.length} 종목</p>
@@ -938,12 +915,87 @@ function App() {
           </section>
 
         </section>
-      </main>
+	      </main>
 
-      {selected && modalOpen ? (
-        <div className="modal-overlay" onClick={(e) => {
-          if (e.target === e.currentTarget) setModalOpen(false)
-        }}>
+	      {showCoupangBanner ? (
+	        <div className="ad-modal-overlay" role="dialog" aria-modal="true" aria-label="쿠팡 파트너스 팝업 광고">
+	          <div className="ad-modal">
+	            <div className="ad-modal-head">
+	              <div className="ad-modal-title">
+	                {coupangBanner?.theme?.title || '생필품 추천'} <span className="ad-badge">AD</span>
+	              </div>
+	              <a
+	                className="ad-modal-close"
+	                href={coupangPrimaryLink || '#'}
+	                target={coupangPrimaryLink ? '_blank' : undefined}
+	                rel={coupangPrimaryLink ? 'noreferrer' : undefined}
+	                onClick={(e) => {
+	                  if (!coupangPrimaryLink) e.preventDefault()
+	                  hideCoupangBanner()
+	                }}
+	                aria-label="닫기"
+	              >
+	                ×
+	              </a>
+	            </div>
+	            <div className="ad-modal-body">
+	              <p className="ad-modal-sub">{coupangBanner?.theme?.tagline || '오늘 필요한 생활템을 모아봤습니다.'}</p>
+
+	              <div className="cpb-grid">
+	                {coupangBannerLoading ? (
+	                  Array.from({ length: 3 }).map((_, idx) => (
+	                    <div key={`cp-skeleton-${idx}`} className="cpb-card cpb-card--skeleton">
+	                      <div className="cpb-thumb" />
+	                      <div className="cpb-lines">
+	                        <span />
+	                        <span />
+	                      </div>
+	                    </div>
+	                  ))
+	                ) : (
+	                  coupangItems.slice(0, 3).map((item, idx) => (
+	                    <a
+	                      key={`cp-item-${idx}-${item?.link || ''}`}
+	                      className="cpb-card"
+	                      href={item?.link}
+	                      target="_blank"
+	                      rel="noreferrer"
+	                      onClick={hideCoupangBanner}
+	                    >
+	                      <img src={item?.image} alt={item?.title || ''} loading="lazy" />
+	                      <div className="cpb-info">
+	                        <div className="cpb-tags">
+	                          {item?.badge ? <span className="cpb-badge">{item.badge}</span> : null}
+	                          {item?.discountRate ? <span className="cpb-pill">{item.discountRate}%↓</span> : null}
+	                          {item?.shippingTag ? (
+	                            <span className="cpb-pill cpb-pill--soft">{item.shippingTag}</span>
+	                          ) : null}
+	                        </div>
+	                        <div className="cpb-title">{item?.title}</div>
+	                        {item?.price ? <div className="cpb-price">{item.price}</div> : null}
+	                        {item?.meta ? <div className="cpb-meta">{item.meta}</div> : null}
+	                        <div className="cpb-cta">{item?.cta || coupangBanner?.theme?.cta || '바로 보기'}</div>
+	                      </div>
+	                    </a>
+	                  ))
+	                )}
+	                {!coupangBannerLoading && coupangItems.length === 0 ? (
+	                  <div className="cpb-empty">추천 상품을 불러오지 못했습니다.</div>
+	                ) : null}
+	              </div>
+
+	              <p className="affiliate-disclosure">
+	                이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+	              </p>
+	            </div>
+	          </div>
+	        </div>
+	      ) : null}
+
+	      {selected && modalOpen ? (
+	        <div className="modal-overlay" onClick={(e) => {
+	          if (e.target === e.currentTarget) setModalOpen(false)
+	        }}>
           <div className="modal-panel">
             <div className="modal-head">
               <div>
@@ -975,24 +1027,22 @@ function App() {
 
             <div className="chart-grid">
               <div className="chart-summary">
-                <div>
-                  <div className="chart-title">Last Close</div>
-                  <div className="delta-value" style={{ opacity: 0.8, fontSize: '16px' }}>{formatCurrency(prev?.close)}</div>
-                  <div className="delta-sub">{prev?.date || '-'}</div>
-                </div>
-                {isSelectedCandidate ? (
-                  <div>
-                    <div className="chart-title" style={{ color: 'var(--accent-2)' }}>Current Price</div>
-                    <div className="delta-value">{formatCurrency(livePrice)}</div>
-                    <div className="delta-sub">{latest?.date || '-'}</div>
-                  </div>
-                ) : null}
-                <div className="delta">
-                  <div className="chart-title">Change</div>
-                  <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>
-                  <div className="delta-sub">{deltaPct === null ? '-' : formatPct(deltaPct)}</div>
-                </div>
-              </div>
+	                <div>
+	                  <div className="chart-title">Last Close</div>
+	                  <div className="delta-value" style={{ opacity: 0.8, fontSize: '16px' }}>{formatCurrency(prev?.close)}</div>
+	                  <div className="delta-sub">{prev?.date || '-'}</div>
+	                </div>
+	                <div>
+	                  <div className="chart-title" style={{ color: 'var(--accent-2)' }}>Current Price</div>
+	                  <div className="delta-value">{formatCurrency(livePrice)}</div>
+	                  <div className="delta-sub">{latest?.date || '-'}</div>
+	                </div>
+	                <div className="delta">
+	                  <div className="chart-title">Change</div>
+	                  <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>
+	                  <div className="delta-sub">{deltaPct === null ? '-' : formatPct(deltaPct)}</div>
+	                </div>
+	              </div>
 
               <div className="chart-card chart-zoom" ref={chartWheelRef}>
                 <div className="chart-title">Price · MA25 · Volume</div>
