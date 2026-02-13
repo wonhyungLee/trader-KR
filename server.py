@@ -1277,6 +1277,7 @@ def selection_realtime_prices():
 
 
 @app.get("/api/coupang-banner")
+@app.get("/bnf/api/coupang-banner")
 def api_coupang_banner():
     """Coupang Partners banner payload (server-side only; never expose secret key to browser).
 
