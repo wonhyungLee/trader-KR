@@ -20,3 +20,4 @@ dist/
 myenv/
 data/*.lock
 data/*.json
+data/csv/

@@ -709,6 +709,9 @@ function App() {
                               <div className="candidate-name-cell">
                                 <span className="name">{r.name}</span>
                                 <span className="code">{r.code}</span>
+                                <span className="sector">
+                                  {([r.sector_name, r.industry_name].filter(Boolean).join(' · ') || 'UNKNOWN')}
+                                </span>
                               </div>
                             </td>
                             <td><span className="market-tag">{r.market}</span></td>

@@ -1319,6 +1319,16 @@ body {
   opacity: 0.8;
 }
 
+.candidate-name-cell .sector {
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.9;
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .market-tag {
   display: inline-flex;
   padding: 4px 8px;
