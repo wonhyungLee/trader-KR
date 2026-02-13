@@ -95,7 +95,7 @@ def main(args: argparse.Namespace):
 
         # universe_members 고정
         store.upsert_universe_members(df.to_dict(orient="records"))
-        # stock_info는 universe_members 기준 250개만 유지
+        # stock_info는 universe_members 기준 350개만 유지
         if "marcap" in df.columns:
             stock_rows = df.assign(marcap=df["marcap"].fillna(0)).to_dict(orient="records")
         else:

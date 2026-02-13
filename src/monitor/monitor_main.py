@@ -23,7 +23,7 @@ def load_universe(settings: dict) -> List[str]:
     monitor = settings.get("monitor", {}) or {}
     paths = monitor.get(
         "universe_paths",
-        ["data/universe_kospi100.csv", "data/universe_kosdaq150.csv"],
+        ["data/universe_kospi200.csv", "data/universe_kosdaq150.csv"],
     )
     codes: List[str] = []
     for p in paths:

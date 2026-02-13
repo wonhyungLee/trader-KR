@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PARENT_DIR="$(dirname "$DIR")"
@@ -8,6 +8,13 @@ cd "$PARENT_DIR"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$PARENT_DIR"
 
+PYBIN="python3"
+if [ -x ".venv/bin/python" ]; then
+  PYBIN=".venv/bin/python"
+elif [ -x "myenv/bin/python" ]; then
+  PYBIN="myenv/bin/python"
+fi
+
 echo "Starting continuous refill loop at $(date)"
 
 while true; do
@@ -15,8 +22,8 @@ while true; do
     echo "Launching refill process (Full Universe)..."
     
     # Removed --limit 50 to process all remaining stocks in one go
-    ./myenv/bin/python -u -m src.collectors.refill_loader \
-      --universe data/universe_kospi100.csv \
+    "$PYBIN" -u -m src.collectors.refill_loader \
+      --universe data/universe_kospi200.csv \
       --universe data/universe_kosdaq150.csv \
       --chunk-days 150 \
       --resume

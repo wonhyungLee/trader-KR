@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /home/ubuntu/종목선별매매프로그램
-source .venv/bin/activate
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+PYBIN="python3"
+if [ -x ".venv/bin/python" ]; then
+  PYBIN=".venv/bin/python"
+elif [ -x "myenv/bin/python" ]; then
+  PYBIN="myenv/bin/python"
+fi
+
 export PYTHONUNBUFFERED=1
-python -u -m src.collectors.refill_loader \
-  --universe data/universe_kospi100.csv \
+"$PYBIN" -u -m src.collectors.refill_loader \
+  --universe data/universe_kospi200.csv \
   --universe data/universe_kosdaq150.csv \
   --chunk-days 150 \
-  --resume \
-  --notify-every 5
+  --resume

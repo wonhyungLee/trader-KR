@@ -7,9 +7,11 @@ fi
 cd "$ROOT"
 export PYTHONUNBUFFERED=1
 
-PYBIN="./myenv/bin/python"
-if [ ! -x "$PYBIN" ]; then
-  PYBIN="python3"
+PYBIN="python3"
+if [ -x ".venv/bin/python" ]; then
+  PYBIN=".venv/bin/python"
+elif [ -x "myenv/bin/python" ]; then
+  PYBIN="myenv/bin/python"
 fi
 
 INTERVAL_ARG=()

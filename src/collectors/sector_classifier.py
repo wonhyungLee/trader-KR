@@ -173,8 +173,8 @@ def main():
 
     refresh_days = max(0, int(args.refresh_days))
     all_codes = store.list_universe_codes()
-    if len(all_codes) != 250:
-        logging.warning("universe_members count expected 250, got %s", len(all_codes))
+    if len(all_codes) != 350:
+        logging.warning("universe_members count expected 350, got %s", len(all_codes))
     targets = store.list_sector_targets(refresh_days)
     if args.limit:
         targets = targets[: args.limit]

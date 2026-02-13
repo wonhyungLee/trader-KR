@@ -25,7 +25,7 @@ conn = sqlite3.connect('data/market_data.db')
 conn.row_factory = sqlite3.Row
 
 # Refill progress
-universe_codes = read_universe(['data/universe_kospi100.csv','data/universe_kosdaq150.csv'])
+universe_codes = read_universe(['data/universe_kospi200.csv','data/universe_kosdaq150.csv'])
 total_universe = len(universe_codes)
 row = conn.execute("SELECT COUNT(*) FROM refill_progress WHERE status='DONE'").fetchone()
 refill_done = row[0] if row else 0
@@ -55,7 +55,7 @@ for t in acc_tables:
 ts = time.strftime("%Y-%m-%d %H:%M:%S")
 msg = (
     f"[DATA STATUS] {ts}\n"
-    f"Refill (KOSPI100+KOSDAQ150): done {min(refill_done,total_universe)}/{total_universe}, remaining {refill_remaining}\n"
+    f"Refill (KOSPI200+KOSDAQ150): done {min(refill_done,total_universe)}/{total_universe}, remaining {refill_remaining}\n"
     f"Accuracy progress: last_index {acc_last}/{acc_total}\n"
     f"Accuracy missing codes: inv {missing['investor_flow_daily']}, prog {missing['program_trade_daily']}, short {missing['short_sale_daily']}, "
     f"credit {missing['credit_balance_daily']}, loan {missing['loan_trans_daily']}, vi {missing['vi_status_daily']}\n"

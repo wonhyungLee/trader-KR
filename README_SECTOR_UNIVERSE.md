@@ -1,7 +1,7 @@
-# Sector-Based Universe (KOSPI100 + KOSDAQ150)
+# Sector-Based Universe (KOSPI200 + KOSDAQ150)
 
-This project uses a fixed universe of 250 tickers based on:
-- `data/universe_kospi100.csv` (100)
+This project uses a fixed universe of 350 tickers based on:
+- `data/universe_kospi200.csv` (200)
 - `data/universe_kosdaq150.csv` (150)
 
 The sector/industry classification is stored in DB (`sector_map`) and exported to CSVs under `data/universe_sectors`.
@@ -15,7 +15,7 @@ python -m src.collectors.sector_classifier --refresh-days 30
 ```
 
 What it does:
-- Reads the 250 `universe_members`.
+- Reads the 350 `universe_members`.
 - Calls KIS stock info APIs to fill `sector_map`.
 - Skips symbols updated within the last N days.
 - Generates sector CSVs:
@@ -38,7 +38,7 @@ python -m src.collectors.universe_loader --record-diff
 This will:
 - Compare the new CSV snapshot with existing `universe_members`.
 - Write diff rows into `universe_changes`.
-- Update `universe_members` and keep the universe size at **250**.
+- Update `universe_members` and keep the universe size at **350**.
 
 ## 3) Optional auto_rank Mode (Market Cap Top N)
 
@@ -50,7 +50,7 @@ python -m src.collectors.universe_loader --auto-rank --top-kospi 100 --top-kosda
 
 **Important limitation**
 - This mode depends on `stock_info.marcap` being populated.
-- The resulting list can **differ from the official KOSPI100/KOSDAQ150 index 구성**.
+- The resulting list can **differ from the official KOSPI200/KOSDAQ150 index 구성**.
 
 ## 4) Data Freshness / Cache
 
@@ -60,9 +60,9 @@ Sector classification is cached in `sector_map`:
 
 ## 5) Acceptance Criteria Checks
 
-- `universe_members` is always **250**
+- `universe_members` is always **350**
 - `sector_map.sector_name != NULL` should be **>= 95%**
-- `data/universe_sectors` contains sector CSVs whose total code count is 250 (no duplicates / no missing)
+- `data/universe_sectors` contains sector CSVs whose total code count is 350 (no duplicates / no missing)
 
 Unknowns are exported to:
 - `data/universe_sectors/UNKNOWN.csv`

@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /home/ubuntu/종목선별매매프로그램
-source .venv/bin/activate
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+PYBIN="python3"
+if [ -x ".venv/bin/python" ]; then
+  PYBIN=".venv/bin/python"
+elif [ -x "myenv/bin/python" ]; then
+  PYBIN="myenv/bin/python"
+fi
+
 export PYTHONUNBUFFERED=1
 # Full refill across stock_info (no universe args)
-python -u -m src.collectors.refill_loader \
-  --source kis \
+"$PYBIN" -u -m src.collectors.refill_loader \
   --chunk-days 120 \
-  --cooldown 0.2 \
-  --resume \
-  --notify-every 5
+  --resume

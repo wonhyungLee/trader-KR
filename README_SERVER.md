@@ -47,28 +47,26 @@ sqlite3 data/market_data.db "VACUUM;"  # 최초 생성 겸 확인
 ## 6. 초기 데이터 적재
 ```bash
 source venv/bin/activate
-python -m src.collectors.universe_loader           # 유니버스 250 고정
+python -m src.collectors.universe_loader           # 유니버스 350 고정 (KOSPI200+KOSDAQ150)
 python -m src.collectors.refill_loader --resume    # KIS 일봉 백필
 ```
 - 이후 매일: `python -m src.collectors.daily_loader`
 
-## 7. 운영 루프 수동 실행 예시 (모의/실전 동일)
+## 7. 운영 루프 수동 실행 예시 (조회/수집/선별 전용)
 ```bash
-python -m src.trader close   # 신호 생성, order_queue 적재
-python -m src.trader open    # 장전 주문 전송
-python -m src.trader sync    # 체결 확인 + Morning Report
-python -m src.trader cancel  # 미체결 취소
+python -m src.collectors.daily_loader
+python -m src.collectors.accuracy_data_loader --resume
+python -m src.monitor.monitor_main
+python server.py
 ```
 
 ## 8. 크론 등록 예시 (KST 기준)
 ```bash
 crontab -e
 # 내용:
-50 08 * * 1-5 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.trader open   >> logs/cron.log 2>&1
-10 09 * * 1-5 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.trader sync   >> logs/cron.log 2>&1
-20 09 * * 1-5 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.trader cancel >> logs/cron.log 2>&1
 35 15 * * 1-5 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.collectors.daily_loader >> logs/cron.log 2>&1
-05 16 * * 1-5 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.trader close  >> logs/cron.log 2>&1
+10 02 * * 1-5 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.collectors.accuracy_data_loader --resume >> logs/cron.log 2>&1
+30 02 * * 6 cd /opt/bnf-k && /opt/bnf-k/venv/bin/python -m src.collectors.refill_loader --resume >> logs/cron.log 2>&1
 ```
 
 
@@ -134,15 +132,14 @@ WantedBy=multi-user.target
 ```
 
 ## 11. 동작 확인 체크리스트
-- `python -m src.brokers.order_test --balance` 로 잔고 조회 가능 여부 확인
 - `python -m src.collectors.daily_loader --limit 3` 로 소량 증분 테스트
 - `python -m src.analyzer.backtest_runner` 실행 후 `data/equity_curve.csv` 생성 확인
-- 텔레그램 알림: `telegram.enabled: true` 설정 후 메시지 수신 여부 확인
+- 디스코드/텔레그램 알림 설정 시 메시지 수신 여부 확인
 
 ## 12. 보안 메모
 - `개인정보` 파일 내용은 절대 README나 코드에 포함하지 말고, 환경변수/비밀 관리 도구로 주입
 - `.cache/kis_token.json`, `data/`, `logs/`는 권한 700 권장
-- 실계좌 전환 시 `env: prod` 로 변경 전 모의로 2~3일 검증
+- 실서버 전환 전에는 수집/선별/모니터 기능만 최소 2~3일 안정화 검증
 
 ---
 

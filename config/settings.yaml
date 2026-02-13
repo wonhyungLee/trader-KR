@@ -23,9 +23,9 @@ kis:
   account_no: "${KIS_ACCOUNT_NO}"
   custtype: "P"
   token_cache_path: ".cache/kis_token.json"
-  # 1/4 throughput vs default 0.25s (lower rate to avoid limit issues)
-  rate_limit_sleep_sec: 1.0
-  accuracy_rate_limit_sleep_sec: 1.0
+  # 10 requests per second
+  rate_limit_sleep_sec: 0.1
+  accuracy_rate_limit_sleep_sec: 0.1
   timeout_connect_sec: 5
   timeout_read_sec: 20
   max_retries: 6
@@ -52,11 +52,11 @@ monitor:
   scan_interval_sec: 60
   rest_batch_size: 30
   rest_max_retries: 5
-  max_ws_subs: 41
+  max_ws_subs: 20
   ws_subscribe_interval_sec: 0.2
   subscribe_cooldown_sec: 180
   alert_cooldown_sec: 600
-  selection_api: "http://127.0.0.1/selection"
+  selection_api: "http://127.0.0.1:5001/selection"
   universe_paths:
     - "data/universe_kospi200.csv"
     - "data/universe_kosdaq150.csv"
@@ -66,6 +66,19 @@ monitor:
     type: "disparity_threshold"
     disparity_threshold: -0.08
     use_intraday: true
+
+watchdog:
+  interval_sec: 60
+  status_notify_interval_sec: 1800
+  daily_enabled: true
+  daily_min_missing: 1
+  daily_stale_days: 1
+  daily_chunk_days: 90
+  daily_cooldown_sec: 900
+  accuracy_min_missing: 1
+  accuracy_cooldown_sec: 21600
+  accuracy_notify_every: 20
+  accuracy_item_sleep_sec: 0.5
 
 # Universe CSV 파일 경로 (KOSPI200 + KOSDAQ150)
 universe:

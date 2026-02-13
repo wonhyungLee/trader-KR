@@ -1,6 +1,6 @@
-# Refill / Backfill 가이드 (KOSPI 100 + KOSDAQ 150) — KIS 기간별시세로 “상장일 ~ 현재” 적재
+# Refill / Backfill 가이드 (KOSPI200 + KOSDAQ 150) — KIS 기간별시세로 “상장일 ~ 현재” 적재
 
-이 문서는 **KOSPI 100 + KOSDAQ 150 유니버스**에 대해, 한국투자증권(KIS) Open API의 **기간별시세(일봉)**를 이용해
+이 문서는 **KOSPI200 + KOSDAQ 150 유니버스**에 대해, 한국투자증권(KIS) Open API의 **기간별시세(일봉)**를 이용해
 **각 종목의 상장일(가능한 한 가장 이른 시점)부터 오늘까지** `daily_price`를 “빈틈 없이(refill)” 적재하는 절차를 정리한 운영 문서입니다.
 
 > 핵심: KIS 일봉은 **호출당 데이터 건수 제한**이 있으므로, **기간을 쪼개서 반복 호출**(chunking)로 누적 적재합니다.  
@@ -10,12 +10,12 @@
 
 ## 0) 목표 / 범위
 
-- 대상 유니버스: **KOSPI 100 + KOSDAQ 150**
+- 대상 유니버스: **KOSPI200 + KOSDAQ 150**
 - 데이터: **일봉 OHLCV + 거래대금(amount)** 중심
 - 기간: **(가능한 한) 상장일 ~ 현재**
 - 적재: SQLite `daily_price(code, date)` 기준 **UPSERT(중복 제거)**
 
-> 전략/트레이딩 로직과 분리: refill은 “데이터 인프라 작업”이며, 운영 루프(close/open/sync/cancel)와 분리해 **1회 또는 주기적(예: 월 1회)으로 실행**합니다.
+> 전략/실행 로직과 분리: refill은 “데이터 인프라 작업”이며, 조회/선별/모니터링 서버와 분리해 **1회 또는 주기적(예: 월 1회)으로 실행**합니다.
 
 ---
 
@@ -23,8 +23,8 @@
 
 ### 1.1 KIS 자격증명(필수)
 - `APP_KEY`, `APP_SECRET`
-- (필요 시) 계좌 식별자: `CANO`, `ACNT_PRDT_CD`  
-  - **시세 조회만**이라면 계좌 정보가 필수는 아닌 구성도 가능하지만, 프로젝트 구현체에 따라 공통 헤더/인증 로직 때문에 함께 쓰는 경우가 많습니다.
+- (선택) 계좌 식별자: `CANO`, `ACNT_PRDT_CD`  
+  - 본 저장소는 조회/수집 중심이므로 계좌 조회/주문 기능은 기본 운영 범위에서 제외합니다.
 
 ### 1.2 레이트리밋/백오프 기본값(권장)
 - `rate_limit_sleep_sec`: **0.5s** (보수적 권장)
@@ -39,12 +39,12 @@
 
 ---
 
-## 2) 유니버스 준비: “KOSPI100 + KOSDAQ150” 코드 목록
+## 2) 유니버스 준비: “KOSPI200 + KOSDAQ150” 코드 목록
 
 ### 2.1 가장 안전한 방식(권장): “유니버스 스냅샷” 파일로 고정
 refill은 시간이 오래 걸릴 수 있어, 도중에 구성 종목이 바뀌면 혼선이 생깁니다.
 
-- `data/universe_kospi100.csv`
+- `data/universe_kospi200.csv`
 - `data/universe_kosdaq150.csv`
 
 컬럼 예시:
@@ -55,7 +55,7 @@ code,name,market
 ...
 ```
 
-> ⚠️ “KOSPI100/코스닥150 구성종목”은 특정 기준일의 지수 구성에 따라 바뀝니다.  
+> ⚠️ “KOSPI200/코스닥150 구성종목”은 특정 기준일의 지수 구성에 따라 바뀝니다.  
 > **한 번 뽑아 ‘스냅샷’으로 고정한 뒤** refill을 수행하세요.
 
 ### 2.2 구현 편의 옵션(대안)
@@ -88,7 +88,7 @@ code,name,market
 ## 4) refill 로더 동작 명세(운영 문서용)
 
 ### 4.1 입력
-- Universe: `data/universe_kospi100.csv`, `data/universe_kosdaq150.csv`
+- Universe: `data/universe_kospi200.csv`, `data/universe_kosdaq150.csv`
 - 옵션:
   - `--chunk-days` (권장 60~120 거래일 수준으로 시작)
   - `--sleep` (기본 0.5)
@@ -127,24 +127,24 @@ code,name,market
 ### 5.1 유니버스 스냅샷 준비
 ```bash
 # (예시) 외부에서 받은 목록을 data/ 폴더에 저장
-ls data/universe_kospi100.csv
+ls data/universe_kospi200.csv
 ls data/universe_kosdaq150.csv
 ```
 
 ### 5.2 1종목 드라이런(권장)
 ```bash
 python src/collectors/refill_loader.py \
-  --universe data/universe_kospi100.csv \
+  --universe data/universe_kospi200.csv \
   --code 005930 \
   --start-mode backward \
   --chunk-days 90 \
   --sleep 0.5
 ```
 
-### 5.3 전체 refill (KOSPI100 + KOSDAQ150)
+### 5.3 전체 refill (KOSPI200 + KOSDAQ150)
 ```bash
 python -m src.collectors.refill_loader \
-  --universe data/universe_kospi100.csv \
+  --universe data/universe_kospi200.csv \
   --universe data/universe_kosdaq150.csv \
   --chunk-days 90 \
   --sleep 0.5 \
@@ -210,5 +210,5 @@ ORDER BY min_date ASC;
 
 ## 9) 다음 단계(추천)
 1) refill 완료 후: `daily_loader`로 “증분”만 유지
-2) 데이터 품질 검증 후: Next-Open 백테스트 → 실전(close/open/sync/cancel) 투입
+2) 데이터 품질 검증 후: Selection 후보/모니터 알림 동작 점검
 3) 장기 운영 시: 유니버스 정기 갱신(분기/월) + 결측/이벤트 대응 로직 강화
