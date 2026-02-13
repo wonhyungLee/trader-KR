@@ -9,6 +9,10 @@ site_url: "http://trader.r-e.kr"
 discord:
   enabled: true
   webhook: "${DISCORD_WEBHOOK_URL}"
+  # Reduce spam: only allow digest-style messages (e.g. selection summary).
+  digest_only: true
+  allow_prefixes:
+    - "[selection]"
 
 kis:
   env: "prod"

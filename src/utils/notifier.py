@@ -11,6 +11,24 @@ def _append_site(settings: dict, message: str) -> str:
         return message
     return f"{message} | site: {url}"
 
+def _normalize_prefixes(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if str(v or "").strip()]
+    return [str(value)]
+
+
+def _should_allow_digest_message(dc: dict, message: str) -> bool:
+    """When digest_only is enabled, suppress non-digest messages to avoid spam."""
+    if not dc or not dc.get("digest_only"):
+        return True
+    prefixes = _normalize_prefixes(dc.get("allow_prefixes"))
+    if not prefixes:
+        prefixes = ["[selection]"]
+    msg = str(message or "").lstrip()
+    return any(msg.startswith(p) for p in prefixes)
+
 
 def send_telegram(bot_token: str, chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
     if not bot_token or not chat_id:
@@ -28,9 +46,11 @@ def send_telegram(bot_token: str, chat_id: str, text: str, parse_mode: str = "Ma
 
 
 def maybe_notify(settings: dict, message: str):
+    dc = settings.get("discord", {}) if isinstance(settings, dict) else {}
+    if not _should_allow_digest_message(dc, message):
+        return
     message = _append_site(settings, message)
     # Discord 시도
-    dc = settings.get("discord", {})
     dc_success = False
     if dc and dc.get("enabled") and dc.get("webhook"):
         try:

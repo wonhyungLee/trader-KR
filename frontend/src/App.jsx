@@ -201,7 +201,7 @@ function App() {
   const coupangPrimaryLink = coupangItems.length ? (coupangItems[0]?.link || '') : ''
   const coupangEmptyMessage = useMemo(() => {
     const err = coupangBanner?.error
-    if (err === 'missing_config') return '서버에 COUPANG 키 설정이 필요합니다.'
+    if (err === 'missing_config') return '서버에 쿠팡 파트너스 API 키 설정이 필요합니다. (쿠팡파트너스api정보.txt)'
     if (err === 'api_error') return '쿠팡 추천 상품을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.'
     return '추천 상품을 불러오지 못했습니다.'
   }, [coupangBanner])
@@ -631,7 +631,7 @@ function App() {
     setZoomRange({ start: range.startIndex, end: range.endIndex })
   }
 
-  const chartHeight = isMobile ? 240 : 320
+  const chartHeight = isMobile ? 280 : 320
   const chartTickFont = isMobile ? 10 : 11
 
   return (
@@ -1169,15 +1169,16 @@ function App() {
 	                      <Area yAxisId="left" type="monotone" dataKey="close" name="Close" stroke="#f97316" fill="rgba(249,115,22,0.2)" />
 	                      <Line yAxisId="left" type="monotone" dataKey="ma25" name="MA25" stroke="#38bdf8" dot={false} />
 	                      <Bar yAxisId="right" dataKey="volume" name="Volume" fill="rgba(56,189,248,0.25)" />
-	                      {!isMobile ? (
-	                        <Brush
-	                          dataKey="date"
-	                          height={20}
-	                          stroke="#94a3b8"
-	                          onChange={handleBrushChange}
-	                          data={chartData}
-	                        />
-	                      ) : null}
+	                      <Brush
+	                        dataKey="date"
+	                        height={isMobile ? 34 : 20}
+	                        stroke="#94a3b8"
+	                        travellerWidth={isMobile ? 18 : 10}
+	                        startIndex={zoomRange.start}
+	                        endIndex={zoomRange.end}
+	                        onChange={handleBrushChange}
+	                        data={chartData}
+	                      />
 	                    </ComposedChart>
 	                  </ResponsiveContainer>
 	                )}

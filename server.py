@@ -216,127 +216,119 @@ def _format_candidate_line(code: str, info: Dict[str, Any]) -> str:
 
 
 def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) -> None:
-    candidates = snapshot.get("candidates") or []
     now_ts = time.time()
     state_exists = SELECTION_NOTIFY_PATH.exists()
-    if not candidates:
-        state = _load_selection_notify_state()
-        _save_selection_notify_state({
-            "last_codes": [],
-            "last_ts": float(state.get("last_ts") or 0.0),
-            "pending_codes": [],
-            "last_sent_codes": state.get("last_sent_codes") or [],
-            "last_sent_ts": float(state.get("last_sent_ts") or 0.0),
-        })
-        return
-    codes = [str(c.get("code") or "").zfill(6) for c in candidates if c.get("code")]
-    if not codes:
-        return
-
     state = _load_selection_notify_state()
+
+    candidates = snapshot.get("candidates") or []
+    codes = [str(c.get("code") or "").zfill(6) for c in candidates if isinstance(c, dict) and c.get("code")]
+
     last_codes = set(state.get("last_codes") or [])
     pending = list(state.get("pending_codes") or [])
-    last_sent_codes = list(state.get("last_sent_codes") or [])
-    last_sent_ts = float(state.get("last_sent_ts") or 0.0)
+    if not codes:
+        pending = []
 
-    def _system_error_line() -> str:
+    # Track newly appeared candidates but do not notify immediately (digest-only).
+    new_codes = [c for c in codes if c not in last_codes]
+    if new_codes:
+        pending = list(dict.fromkeys(pending + new_codes))
+    if pending and codes:
+        codes_set = set(codes)
+        pending = [c for c in pending if c in codes_set]
+
+    # Initialize state without sending notifications on first run (prevents spam on restarts).
+    if not last_codes and not state_exists:
+        seed = codes[: min(10, len(codes))]
+        _save_selection_notify_state(
+            {
+                "last_codes": codes,
+                "last_ts": float(state.get("last_ts") or 0.0),
+                "pending_codes": pending,
+                "last_sent_codes": seed,
+                "last_sent_ts": now_ts,
+            }
+        )
+        return
+
+    last_sent_ts = float(state.get("last_sent_ts") or 0.0)
+    repeat_sec = SELECTION_NOTIFY_REPEAT_SEC
+    repeat_due = repeat_sec > 0 and (now_ts - last_sent_ts) >= repeat_sec
+
+    def _status_line() -> str:
+        # Selection loop health
         err = _selection_notify_health.get("last_error")
         err_ts = float(_selection_notify_health.get("last_error_ts") or 0.0)
         ok_ts = float(_selection_notify_health.get("last_ok_ts") or 0.0)
         if err and err_ts >= ok_ts and err_ts > 0 and (now_ts - err_ts) < 86400:
-            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(err_ts))
             text = str(err).strip().replace("\n", " ")
-            if len(text) > 180:
-                text = text[:180] + "..."
-            return f"system_error: {text} (at {when})"
-        return "system_error: none"
+            if len(text) > 120:
+                text = text[:120] + "..."
+            return f"상태: ERROR ({text})"
 
-    def _site_line() -> str:
+        # Candidate WS health (optional)
+        ws_err = _candidate_ws_health.get("last_error")
+        ws_err_ts = float(_candidate_ws_health.get("last_error_ts") or 0.0)
+        ws_ok_ts = float(_candidate_ws_health.get("last_ok_ts") or 0.0)
+        if ws_err and ws_err_ts >= ws_ok_ts and ws_err_ts > 0 and (now_ts - ws_err_ts) < 86400:
+            text = str(ws_err).strip().replace("\n", " ")
+            if len(text) > 120:
+                text = text[:120] + "..."
+            return f"상태: WS_ERROR ({text})"
+
+        return "상태: OK"
+
+    def _site_url() -> str:
         url = settings.get("site_url") or settings.get("site", {}).get("url") or ""
-        url = str(url).strip()
-        if not url:
-            return ""
-        return f"site: {url}"
+        return str(url).strip()
 
-    info_map = {str(c.get("code") or "").zfill(6): c for c in candidates}
-
-    def _build_message(label: str, rec_codes: list[str]) -> str:
-        header = f"[selection] 추천({label}) total={len(codes)}"
-        if snapshot.get("date"):
-            header += f" date={snapshot.get('date')}"
-        lines = [header]
-        for idx, code in enumerate(rec_codes[:12], start=1):
-            line = _format_candidate_line(code, info_map.get(code, {}))
-            if line:
-                lines.append(f"{idx}. {line}")
-        if len(lines) == 1:
-            lines.append("(추천 종목 없음)")
-        lines.append(_system_error_line())
-        site = _site_line()
-        if site:
-            lines.append(site)
-        return "\n".join(lines)
-
-    # Initialize state without sending notifications on first run
-    if not last_codes and not state_exists:
-        seed = codes[: min(12, len(codes))]
-        _save_selection_notify_state({
-            "last_codes": codes,
-            "last_ts": float(state.get("last_ts") or 0.0),
-            "pending_codes": [],
-            "last_sent_codes": seed,
-            "last_sent_ts": now_ts,
-        })
-        return
-
-    new_codes = [c for c in codes if c not in last_codes]
-    if new_codes:
-        pending = list(dict.fromkeys(pending + new_codes))
-
-    # 1) New codes: notify as soon as cooldown allows.
-    if pending:
-        cooldown_ok = now_ts - float(state.get("last_ts") or 0.0) >= SELECTION_NOTIFY_COOLDOWN_SEC
-        if not cooldown_ok:
-            _save_selection_notify_state({
+    # Not due -> just update state.
+    if not repeat_due:
+        _save_selection_notify_state(
+            {
                 "last_codes": codes,
                 "last_ts": float(state.get("last_ts") or 0.0),
                 "pending_codes": pending,
-                "last_sent_codes": last_sent_codes,
+                "last_sent_codes": state.get("last_sent_codes") or [],
                 "last_sent_ts": last_sent_ts,
-            })
-            return
-
-        msg = _build_message("신규", pending)
-        _async_notify(settings, msg)
-        _save_selection_notify_state({
-            "last_codes": codes,
-            "last_ts": now_ts,
-            "pending_codes": [],
-            "last_sent_codes": pending[:12],
-            "last_sent_ts": now_ts,
-        })
+            }
+        )
         return
 
-    # 2) No new codes: periodically re-recommend the last sent (keeps the channel alive without spamming).
-    repeat_sec = SELECTION_NOTIFY_REPEAT_SEC
-    repeat_due = repeat_sec > 0 and (now_ts - last_sent_ts) >= repeat_sec
-    if repeat_due and last_sent_codes:
-        rec = [c for c in last_sent_codes if c in info_map]
-        if not rec:
-            rec = codes[: min(12, len(codes))]
-        msg = _build_message("최근", rec)
-        _async_notify(settings, msg)
-        _save_selection_notify_state({
+    info_map = {str(c.get("code") or "").zfill(6): c for c in candidates if isinstance(c, dict)}
+
+    # Build digest message (1 per repeat_sec).
+    rec_codes = pending if pending else codes
+    rec_codes = rec_codes[: min(10, len(rec_codes))]
+    rec_parts: list[str] = []
+    for code in rec_codes:
+        info = info_map.get(code) or {}
+        name = str(info.get("name") or "").strip()
+        rec_parts.append(f"{code} {name}".strip())
+
+    head = "[selection] 추천"
+    if snapshot.get("date"):
+        head += f" date={snapshot.get('date')}"
+    if rec_parts:
+        head += f" ({len(rec_parts)}): " + ", ".join(rec_parts)
+    else:
+        head += " (0): (추천 종목 없음)"
+
+    lines = [head, _status_line()]
+    url = _site_url()
+    if url:
+        lines.append(url)
+    msg = "\n".join([line for line in lines if line])
+    _async_notify(settings, msg)
+
+    _save_selection_notify_state(
+        {
             "last_codes": codes,
             "last_ts": float(state.get("last_ts") or 0.0),
             "pending_codes": [],
-            "last_sent_codes": rec[:12],
+            "last_sent_codes": rec_codes,
             "last_sent_ts": now_ts,
-        })
-        return
-
-    state["last_codes"] = codes
-    _save_selection_notify_state(state)
+        }
+    )
 
 
 def _disabled_response():
@@ -557,6 +549,86 @@ _COUPANG_BANNER_KEYWORDS = [
 ]
 
 _COUPANG_BANNER_CTA_VARIANTS = ["최저가 보기", "배송 일정 확인", "리뷰 보고 선택"]
+_COUPANG_API_INFO_FILENAMES = (
+    "쿠팡파트너스api정보.txt",
+    "쿠팡파트너스 api정보.txt",
+    "쿠팡파트너스api.txt",
+)
+
+
+def _load_coupang_env_from_api_info_file() -> None:
+    """Best-effort loader for Coupang Partners keys from a local text file.
+
+    User stores credentials outside the repo (e.g. ~/쿠팡파트너스api정보.txt). We only fill missing
+    env vars and never expose secrets to the frontend.
+    """
+    if str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip() and str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip():
+        return
+
+    candidates: list[Path] = []
+    override = str(os.getenv("COUPANG_API_INFO_PATH", "") or "").strip()
+    if override:
+        candidates.append(Path(override))
+
+    cwd = Path.cwd()
+    home = Path.home()
+    for name in _COUPANG_API_INFO_FILENAMES:
+        candidates.append(cwd / name)
+        candidates.append(cwd.parent / name)
+        candidates.append(home / name)
+
+    def _next_nonempty(lines: list[str], idx: int) -> str:
+        for j in range(idx + 1, len(lines)):
+            v = str(lines[j] or "").strip()
+            if v:
+                return v
+        return ""
+
+    for path in candidates:
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+        except Exception:
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        head_lines = [line.strip() for line in (raw.splitlines()[:120] if raw else [])]
+        access_key = ""
+        secret_key = ""
+        partner_id = ""
+
+        for idx, line in enumerate(head_lines):
+            key = str(line or "").strip().lower()
+            if key in ("access key", "access-key", "accesskey", "access_key"):
+                access_key = _next_nonempty(head_lines, idx)
+            elif key in ("secret key", "secret-key", "secretkey", "secret_key"):
+                secret_key = _next_nonempty(head_lines, idx)
+            elif key in ("id", "partner id", "partner_id"):
+                partner_id = _next_nonempty(head_lines, idx)
+
+        # Also accept KEY=VALUE style lines in the header region.
+        for line in head_lines:
+            if not line or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = str(k or "").strip().upper()
+            v = str(v or "").strip().strip('"').strip("'")
+            if k in ("COUPANG_ACCESS_KEY", "ACCESS_KEY"):
+                access_key = access_key or v
+            elif k in ("COUPANG_SECRET_KEY", "SECRET_KEY"):
+                secret_key = secret_key or v
+            elif k in ("COUPANG_PARTNER_ID", "PARTNER_ID"):
+                partner_id = partner_id or v
+
+        if access_key and secret_key:
+            os.environ.setdefault("COUPANG_ACCESS_KEY", access_key)
+            os.environ.setdefault("COUPANG_SECRET_KEY", secret_key)
+            if partner_id:
+                os.environ.setdefault("COUPANG_PARTNER_ID", partner_id)
+            return
 
 
 def _encode_coupang_component(value: Any) -> str:
@@ -1295,6 +1367,7 @@ def api_coupang_banner():
         limit = 3
     limit = max(1, min(10, limit))
 
+    _load_coupang_env_from_api_info_file()
     access_key = str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip()
     secret_key = str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip()
     sub_id = str(os.getenv("COUPANG_SUB_ID", "") or "").strip() or "cp-banner"
