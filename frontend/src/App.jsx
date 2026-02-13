@@ -215,6 +215,14 @@ function App() {
       .finally(() => setPricesLoading(false))
   }, [selected, days])
 
+  const candidates = useMemo(() => asArray(selection?.candidates), [selection])
+  const candidateCodesKey = useMemo(() => candidates.map((c) => c?.code).filter(Boolean).join(','), [candidates])
+  const isSelectedCandidate = useMemo(() => {
+    if (!selected) return false
+    const code = String(selected.code || '')
+    return candidates.some((c) => String(c?.code || '') === code)
+  }, [selected, candidates])
+
   // 실시간 가격은 팝업이 열려 있을 때만 1분 주기로 갱신
   useEffect(() => {
     if (!selected || !modalOpen) return
@@ -308,13 +316,6 @@ function App() {
       })
   }, [universe, filter, sectorFilter, search])
 
-  const candidates = useMemo(() => asArray(selection?.candidates), [selection])
-  const candidateCodesKey = useMemo(() => candidates.map((c) => c?.code).filter(Boolean).join(','), [candidates])
-  const isSelectedCandidate = useMemo(() => {
-    if (!selected) return false
-    const code = String(selected.code || '')
-    return candidates.some((c) => String(c?.code || '') === code)
-  }, [selected, candidates])
   const selectionStages = useMemo(() => asArray(selection?.stages), [selection])
   const selectionStageItems = selection?.stage_items && typeof selection.stage_items === 'object' ? selection.stage_items : {}
 
