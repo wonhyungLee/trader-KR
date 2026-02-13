@@ -209,6 +209,7 @@ def main():
     settings = load_settings()
     db_path = settings.get("database", {}).get("path", "data/market_data.db")
     store = SQLiteStore(db_path)
+    store.cleanup_stale_running_jobs()
     job_id = store.start_job("refill_loader")
     
     kis_client = KISPriceClient(settings)

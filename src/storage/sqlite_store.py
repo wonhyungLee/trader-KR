@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import logging
+import re
 import pandas as pd
 from typing import List, Dict, Any, Optional, Iterable
 from datetime import datetime, timedelta
@@ -429,11 +430,64 @@ class SQLiteStore:
         self.conn.commit()
 
     # ---------- job_runs ----------
+    def _extract_job_pid(self, message: str) -> Optional[int]:
+        if not message:
+            return None
+        match = re.search(r"\bpid=(\d+)\b", str(message))
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+        return None
+
+    def _is_process_alive(self, pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    def cleanup_stale_running_jobs(self, stale_sec: int = 24 * 60 * 60) -> int:
+        """Mark old RUNNING rows as ERROR when process has died or job duration exceeded.
+
+        Returns the number of cleaned rows.
+        """
+        limit_dt = (datetime.utcnow() - timedelta(seconds=stale_sec)).isoformat()
+        rows = self.conn.execute(
+            "SELECT id, message, started_at FROM job_runs WHERE status='RUNNING' AND started_at < ?",
+            (limit_dt,),
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            pid = self._extract_job_pid(row["message"])
+            if pid and self._is_process_alive(pid):
+                continue
+            self.conn.execute(
+                "UPDATE job_runs SET finished_at=?, status='ERROR', message=? WHERE id=?",
+                (
+                    datetime.utcnow().isoformat(),
+                    f"{row['message']} | stale_running_cleanup",
+                    row[0],
+                ),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
     def start_job(self, job_name: str, message: str = "") -> int:
         now = datetime.utcnow().isoformat()
+        pid = os.getpid()
+        msg = str(message or "").strip()
+        if msg:
+            if "pid=" not in msg:
+                msg = f"{msg} pid={pid}"
+        else:
+            msg = f"pid={pid}"
         cur = self.conn.execute(
             "INSERT INTO job_runs(job_name, started_at, status, message) VALUES(?,?,?,?)",
-            (job_name, now, "RUNNING", message or ""),
+            (job_name, now, "RUNNING", msg),
         )
         self.conn.commit()
         return int(cur.lastrowid)

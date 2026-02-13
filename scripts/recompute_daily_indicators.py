@@ -76,12 +76,14 @@ def main():
     records = df[["date", "code", "open", "high", "low", "close", "volume", "amount", "ma25", "disparity"]].copy()
     records["date"] = records["date"].dt.strftime("%Y-%m-%d")
 
-    rows = [tuple(r) for r in records.to_numpy()]
+    # Normalize NaN -> NULL for SQLite. (float columns otherwise keep IEEE NaN)
+    records = records.astype(object).where(pd.notna(records), None)
+    rows = list(records.itertuples(index=False, name=None))
     conn.executemany(
         """
         INSERT OR REPLACE INTO daily_price
         (date, code, open, high, low, close, volume, amount, ma25, disparity)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?)
         """,
         rows,
     )

@@ -413,6 +413,7 @@ def main():
 
     settings = load_settings()
     store = SQLiteStore(settings.get("database", {}).get("path", "data/market_data.db"))
+    store.cleanup_stale_running_jobs()
     broker = KISBroker(settings)
     if args.rate_sleep is not None:
         broker.rate_limit_sleep = float(args.rate_sleep)
@@ -498,10 +499,20 @@ def main():
     errors = 0
     failed_codes: List[str] = []
     failed_path = Path("data/csv/failed_codes_accuracy.csv")
+    job_id = store.start_job(
+        "accuracy_data_loader",
+        (
+            f"range={start_ymd}-{end_ymd} "
+            f"codes={len(codes)} start_index={args.start_index} "
+            f"limit={args.limit if args.limit else total}"
+        ),
+    )
     maybe_notify(
         settings,
         f"[accuracy] start {args.start_index}/{total_global} range={start_ymd}-{end_ymd} rate_sleep={broker.rate_limit_sleep}",
     )
+    final_job_status = "SUCCESS"
+    final_job_message = ""
 
     item_sleep = args.sleep
     if item_sleep is None:
@@ -609,17 +620,30 @@ def main():
             if item_sleep and item_sleep > 0:
                 time.sleep(item_sleep)
             idx += 1
+    except Exception as exc:
+        final_job_status = "ERROR"
+        final_job_message = f"[accuracy] fatal error after {args.start_index + done}/{total_global}: {exc}"
+        logging.exception("accuracy_data_loader fatal error")
+        maybe_notify(settings, final_job_message)
     finally:
         try:
             lock_path.unlink()
         except Exception:
             pass
 
+        if not final_job_message:
+            if final_job_status == "SUCCESS" and failed_codes:
+                final_job_status = "PARTIAL"
+                final_job_message = f"[accuracy] done {args.start_index + done}/{total_global} errors={errors} failed={len(failed_codes)}"
+            elif final_job_status == "SUCCESS":
+                final_job_message = f"[accuracy] done {args.start_index + done}/{total_global} errors={errors}"
+        try:
+            store.finish_job(job_id, status=final_job_status, message=final_job_message)
+        except Exception:
+            logging.exception("accuracy finish_job failed")
+
     maybe_export_db(settings, store.db_path)
-    if failed_codes:
-        maybe_notify(settings, f"[accuracy] done {args.start_index + done}/{total_global} errors={errors} failed={len(failed_codes)}")
-    else:
-        maybe_notify(settings, f"[accuracy] done {args.start_index + done}/{total_global} errors={errors}")
+    maybe_notify(settings, final_job_message)
 
 
 if __name__ == "__main__":
