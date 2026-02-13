@@ -17,6 +17,8 @@ export const fetchSelection = () => api.get('/selection').then(r => r.data);
 export const fetchSelectionFilters = () => api.get('/selection_filters').then(r => r.data);
 export const updateSelectionFilterToggle = (key, enabled, password) =>
   api.post('/selection_filters/toggle', { key, enabled, password }).then(r => r.data);
+export const fetchCoupangBanner = ({ keyword, limit } = {}) =>
+  api.get('/api/coupang-banner', { params: { ...(keyword ? { keyword } : {}), ...(limit ? { limit } : {}) } }).then(r => r.data);
 export const fetchPortfolio = () => api.get('/portfolio').then(r => r.data);
 export const fetchPlans = () => api.get('/plans').then(r => r.data);
 export const fetchAccount = () => api.get('/account').then(r => r.data);

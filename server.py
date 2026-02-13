@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
+import random
 import sqlite3
 import logging
 import json
@@ -10,9 +13,11 @@ import time
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
+import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
@@ -67,6 +72,10 @@ _candidate_ws_targets: set[str] = set()
 _candidate_ws_prices: Dict[str, Dict[str, Any]] = {}
 _candidate_ws_thread: Optional[threading.Thread] = None
 _candidate_ws_health: Dict[str, Any] = {"last_error": None, "last_error_ts": 0.0, "last_ok_ts": 0.0}
+
+# Coupang Partners banner cache (in-memory, best-effort).
+_coupang_banner_cache_lock = threading.Lock()
+_coupang_banner_cache: Dict[str, Any] = {"key": "", "expires_at": 0.0, "payload": None}
 
 # Create DB and tables if missing
 _store = SQLiteStore(str(DB_PATH))
@@ -520,6 +529,163 @@ def _latest_price_map(conn: sqlite3.Connection, codes: list[str]) -> Dict[str, D
         out[row[0]] = {"close": row[1], "date": row[2]}
     return out
 
+
+_COUPANG_BANNER_KEYWORDS = [
+    # Daily necessities / household staples (생필품 위주).
+    "화장지",
+    "물티슈",
+    "키친타월",
+    "세탁세제",
+    "섬유유연제",
+    "주방세제",
+    "락스",
+    "쓰레기봉투",
+    "고무장갑",
+    "랩",
+    "위생장갑",
+    "치약",
+    "칫솔",
+    "샴푸",
+    "바디워시",
+    "핸드워시",
+    "생수",
+    "라면",
+    "즉석밥",
+    "커피믹스",
+]
+
+_COUPANG_BANNER_CTA_VARIANTS = ["최저가 보기", "배송 일정 확인", "리뷰 보고 선택"]
+
+
+def _encode_coupang_component(value: Any) -> str:
+    # Match JS encodeURIComponent for signature correctness (space -> %20, keep -_.!~*'()).
+    return quote(str(value or ""), safe="-_.!~*'()")
+
+
+def _coupang_signed_date(now_ts: Optional[float] = None) -> str:
+    ts = float(now_ts if now_ts is not None else time.time())
+    return time.strftime("%y%m%dT%H%M%SZ", time.gmtime(ts))
+
+
+def _coupang_hmac_sha256_hex(secret_key: str, message: str) -> str:
+    return hmac.new(secret_key.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _format_krw(value: Any) -> str:
+    num = _safe_float(value)
+    if num is None or num <= 0:
+        return ""
+    return f"{int(round(num)):,}원"
+
+
+def _coupang_fetch_search_products(
+    access_key: str,
+    secret_key: str,
+    *,
+    keyword: str,
+    limit: int = 3,
+    sub_id: str = "cp-banner",
+    timeout_sec: float = 8.0,
+) -> list[dict]:
+    path = "/v2/providers/affiliate_open_api/apis/openapi/v1/products/search"
+    query = (
+        f"keyword={_encode_coupang_component(keyword)}"
+        f"&limit={_encode_coupang_component(str(limit))}"
+        f"&subId={_encode_coupang_component(sub_id)}"
+    )
+    signed_date = _coupang_signed_date()
+    message = f"{signed_date}GET{path}{query}"
+    signature = _coupang_hmac_sha256_hex(secret_key, message)
+    authorization = (
+        "CEA algorithm=HmacSHA256, "
+        f"access-key={access_key}, "
+        f"signed-date={signed_date}, "
+        f"signature={signature}"
+    )
+
+    url = f"https://api-gateway.coupang.com{path}?{query}"
+    resp = requests.get(url, headers={"Authorization": authorization}, timeout=timeout_sec)
+    if not resp.ok:
+        raise RuntimeError(f"Coupang API error: {resp.status_code} {resp.text}".strip())
+
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError("Coupang API error: invalid JSON") from exc
+
+    if isinstance(data, dict) and data.get("rCode") and str(data.get("rCode")) != "0":
+        raise RuntimeError(str(data.get("rMessage") or "Coupang API error"))
+
+    products = data.get("data", {}).get("productData", []) if isinstance(data, dict) else []
+    return products if isinstance(products, list) else []
+
+
+def _coupang_pick_keyword(now_ts: float) -> str:
+    pool = _COUPANG_BANNER_KEYWORDS
+    if not pool:
+        return "생필품"
+    # Deterministic pick per 30-minute slot -> reduces API calls under load.
+    slot = int(now_ts // 1800)
+    return pool[slot % len(pool)] or "생필품"
+
+
+def _coupang_map_products(products: list[dict], *, badge: str = "생필품") -> list[Dict[str, Any]]:
+    items: list[Dict[str, Any]] = []
+    for index, product in enumerate(products or []):
+        if not isinstance(product, dict):
+            continue
+        title = str(product.get("productName") or "").strip()
+        image = str(product.get("productImage") or "").strip()
+        link = str(product.get("productUrl") or "").strip()
+        if not title or not image or not link:
+            continue
+
+        discount = _safe_float(product.get("productDiscountRate"))
+        discount_rate = int(round(discount)) if discount is not None and discount > 0 else None
+        rocket = bool(
+            product.get("rocketWow")
+            or product.get("rocket")
+            or product.get("isRocket")
+            or product.get("isRocketWow")
+            or (str(product.get("rocketDeliveryType") or "").upper() == "ROCKET")
+        )
+        free_shipping = bool(product.get("isFreeShipping") or product.get("freeShipping"))
+        shipping_tag = "로켓배송" if rocket else ("무료배송" if free_shipping else "")
+
+        rating_count_raw = product.get("ratingCount", product.get("reviewCount"))
+        rating_count = int(_safe_float(rating_count_raw) or 0)
+        rating_raw = product.get("rating", product.get("ratingAverage", product.get("ratingScore")))
+        rating = _safe_float(rating_raw)
+
+        meta_parts: list[str] = []
+        if rating is not None and rating > 0:
+            meta_parts.append(f"★{rating:.1f}")
+        if rating_count > 0:
+            meta_parts.append(f"리뷰 {rating_count:,}개")
+        if shipping_tag:
+            meta_parts.append(shipping_tag)
+        category_name = str(product.get("categoryName") or "").strip()
+        if category_name:
+            meta_parts.append(category_name)
+
+        items.append(
+            {
+                "title": title,
+                "image": image,
+                "link": link,
+                "price": _format_krw(product.get("productPrice")),
+                "meta": " · ".join([p for p in meta_parts if p]) if meta_parts else "",
+                "badge": badge,
+                "discountRate": discount_rate,
+                "cta": _COUPANG_BANNER_CTA_VARIANTS[index % len(_COUPANG_BANNER_CTA_VARIANTS)]
+                if _COUPANG_BANNER_CTA_VARIANTS
+                else "바로 보기",
+                "shippingTag": shipping_tag,
+                "ratingCount": rating_count if rating_count > 0 else None,
+                "rating": rating if rating is not None and rating > 0 else None,
+            }
+        )
+    return items
 
 def _dummy_portfolio_positions(conn: sqlite3.Connection, max_positions: int = 8) -> list[Dict[str, Any]]:
     _ensure_latest_table(conn)
@@ -1108,6 +1274,89 @@ def selection_realtime_prices():
             "updated_at": time.time(),
         }
     )
+
+
+@app.get("/api/coupang-banner")
+def api_coupang_banner():
+    """Coupang Partners banner payload (server-side only; never expose secret key to browser).
+
+    Query params:
+      - keyword: force a search keyword (optional)
+      - limit: 1~10 (optional, default 3)
+    """
+    now_ts = time.time()
+    keyword_override = str(request.args.get("keyword") or "").strip()
+    try:
+        limit = int(str(request.args.get("limit") or "3").strip())
+    except Exception:
+        limit = 3
+    limit = max(1, min(10, limit))
+
+    access_key = str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip()
+    secret_key = str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip()
+    sub_id = str(os.getenv("COUPANG_SUB_ID", "") or "").strip() or "cp-banner"
+
+    if not access_key or not secret_key:
+        return jsonify(
+            {
+                "error": "missing_config",
+                "keyword": keyword_override or "",
+                "theme": {
+                    "id": "daily-necessities",
+                    "title": "생필품 추천",
+                    "tagline": "쿠팡 추천 상품을 불러오려면 서버에 COUPANG 키 설정이 필요합니다.",
+                    "cta": "바로 보기",
+                },
+                "items": [],
+            }
+        )
+
+    if keyword_override:
+        keyword = keyword_override
+        cache_key = f"cp-banner:kw:{keyword_override}:limit:{limit}"
+    else:
+        keyword = _coupang_pick_keyword(now_ts)
+        slot = int(now_ts // 1800)
+        cache_key = f"cp-banner:slot:{slot}:limit:{limit}"
+
+    with _coupang_banner_cache_lock:
+        if (
+            _coupang_banner_cache.get("key") == cache_key
+            and float(_coupang_banner_cache.get("expires_at") or 0.0) > now_ts
+            and isinstance(_coupang_banner_cache.get("payload"), dict)
+        ):
+            return jsonify(_coupang_banner_cache["payload"])
+
+    try:
+        products = _coupang_fetch_search_products(
+            access_key,
+            secret_key,
+            keyword=keyword,
+            limit=limit,
+            sub_id=sub_id,
+        )
+        items = _coupang_map_products(products, badge="생필품")
+    except Exception as exc:
+        logging.warning("coupang banner fetch failed: %s", exc)
+        items = []
+
+    payload = {
+        "keyword": keyword,
+        "theme": {
+            "id": "daily-necessities",
+            "title": "생필품 추천",
+            "tagline": "오늘 필요한 생활템을 모아봤습니다.",
+            "cta": "쿠팡에서 보기",
+        },
+        "items": items,
+    }
+
+    ttl = 1800 if items else 120
+    with _coupang_banner_cache_lock:
+        _coupang_banner_cache["key"] = cache_key
+        _coupang_banner_cache["expires_at"] = now_ts + ttl
+        _coupang_banner_cache["payload"] = payload
+    return jsonify(payload)
 
 
 @app.get("/signals")

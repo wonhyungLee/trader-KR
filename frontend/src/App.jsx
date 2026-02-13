@@ -7,7 +7,8 @@ import {
   fetchSelectionRealtimePrices,
   fetchSelection,
   fetchSelectionFilters,
-  updateSelectionFilterToggle
+  updateSelectionFilterToggle,
+  fetchCoupangBanner
 } from './api'
 import {
   ResponsiveContainer,
@@ -90,6 +91,55 @@ function App() {
   const [isStockPanelOpen, setIsStockPanelOpen] = useState(false)
   const [updateKey, setUpdateKey] = useState(0)
   const prevCandidatesRef = useRef([])
+
+  const COUPANG_BANNER_HIDE_KEY = 'coupang_banner_hide_until'
+  const COUPANG_BANNER_HIDE_MS = 6 * 60 * 60 * 1000
+  const [showCoupangBanner, setShowCoupangBanner] = useState(false)
+  const [coupangBannerLoading, setCoupangBannerLoading] = useState(false)
+  const [coupangBanner, setCoupangBanner] = useState(null)
+
+  const hideCoupangBanner = useCallback(() => {
+    const hideUntil = Date.now() + COUPANG_BANNER_HIDE_MS
+    try {
+      localStorage.setItem(COUPANG_BANNER_HIDE_KEY, String(hideUntil))
+    } catch {
+      // Ignore storage errors (private mode, quota, etc.)
+    }
+    setShowCoupangBanner(false)
+  }, [])
+
+  useEffect(() => {
+    let hideUntil = 0
+    try {
+      hideUntil = Number(localStorage.getItem(COUPANG_BANNER_HIDE_KEY) || '0')
+    } catch {
+      hideUntil = 0
+    }
+    if (hideUntil && Date.now() < hideUntil) return
+    setShowCoupangBanner(true)
+  }, [])
+
+  useEffect(() => {
+    if (!showCoupangBanner) return
+    let cancelled = false
+    setCoupangBannerLoading(true)
+    fetchCoupangBanner({ limit: 3 })
+      .then((payload) => {
+        if (cancelled) return
+        setCoupangBanner(payload && typeof payload === 'object' ? payload : null)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setCoupangBanner(null)
+      })
+      .finally(() => {
+        if (cancelled) return
+        setCoupangBannerLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [showCoupangBanner])
 
   const startSelectionLoadingProgress = useCallback(() => {
     if (selectionLoadingTimerRef.current) {
@@ -553,6 +603,69 @@ function App() {
           </div>
         </div>
       </header>
+
+      {showCoupangBanner ? (
+        <section className="panel section affiliate-panel" aria-label="쿠팡 파트너스 배너 광고">
+          <div className="section-head affiliate-head">
+            <div>
+              <h2>
+                {coupangBanner?.theme?.title || '생필품 추천'} <span className="ad-badge">AD</span>
+              </h2>
+              <p>{coupangBanner?.theme?.tagline || '오늘 필요한 생활템을 모아봤습니다.'}</p>
+            </div>
+            <button type="button" className="close-ad-btn" onClick={hideCoupangBanner} aria-label="배너 닫기">
+              ×
+            </button>
+          </div>
+
+          <div className="cpb-grid" id="coupang-banner">
+            {coupangBannerLoading ? (
+              Array.from({ length: 3 }).map((_, idx) => (
+                <div key={`cp-skeleton-${idx}`} className="cpb-card cpb-card--skeleton">
+                  <div className="cpb-thumb" />
+                  <div className="cpb-lines">
+                    <span />
+                    <span />
+                  </div>
+                </div>
+              ))
+            ) : (
+              asArray(coupangBanner?.items).slice(0, 6).map((item, idx) => (
+                <a
+                  key={`cp-item-${idx}-${item?.link || ''}`}
+                  className="cpb-card"
+                  href={item?.link}
+                  target="_blank"
+                  rel="noreferrer"
+                  onMouseDown={hideCoupangBanner}
+                >
+                  <img src={item?.image} alt={item?.title || ''} loading="lazy" />
+                  <div className="cpb-info">
+                    <div className="cpb-tags">
+                      {item?.badge ? <span className="cpb-badge">{item.badge}</span> : null}
+                      {item?.discountRate ? <span className="cpb-pill">{item.discountRate}%↓</span> : null}
+                      {item?.shippingTag ? (
+                        <span className="cpb-pill cpb-pill--soft">{item.shippingTag}</span>
+                      ) : null}
+                    </div>
+                    <div className="cpb-title">{item?.title}</div>
+                    {item?.price ? <div className="cpb-price">{item.price}</div> : null}
+                    {item?.meta ? <div className="cpb-meta">{item.meta}</div> : null}
+                    <div className="cpb-cta">{item?.cta || coupangBanner?.theme?.cta || '바로 보기'}</div>
+                  </div>
+                </a>
+              ))
+            )}
+            {!coupangBannerLoading && asArray(coupangBanner?.items).length === 0 ? (
+              <div className="cpb-empty">추천 상품을 불러오지 못했습니다.</div>
+            ) : null}
+          </div>
+
+          <p className="affiliate-disclosure">
+            이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+          </p>
+        </section>
+      ) : null}
 
       <main className="layout">
         <aside id="stocks" className={`panel stock-panel ${isStockPanelOpen ? 'open' : ''}`}>
