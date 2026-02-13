@@ -419,7 +419,6 @@ function App() {
           <h1 className="brand-title">BNF-K Selection Desk</h1>
           <p className="brand-sub">
             주식 종목을 선별하고 신규 후보를 디스코드로 알림합니다.
-            <span className="hold-note">보유 권장 기간: 6개월</span>
           </p>
         </div>
         <div className="controls">
@@ -439,16 +438,18 @@ function App() {
               ))}
             </select>
           </div>
-          <a
-            className="discord-btn"
-            href="https://discord.gg/XHE5kKvGU"
-            target="_blank"
-            rel="noreferrer"
-          >
-            디스코드 알람받기
-          </a>
-          <button className="primary-btn" onClick={() => loadData()}>Refresh</button>
-          <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
+          <div className="control-actions">
+            <a
+              className="discord-btn"
+              href="https://discord.gg/XHE5kKvGU"
+              target="_blank"
+              rel="noreferrer"
+            >
+              디스코드 알람받기
+            </a>
+            <button className="primary-btn" onClick={() => loadData()}>Refresh</button>
+            <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
+          </div>
         </div>
       </header>
 
@@ -590,11 +591,11 @@ function App() {
                 </div>
 
                 <div className="final-board">
-                  <div className="final-head">
-                    <div>
-                      <div className="filter-tag">Final</div>
-                      <div className="filter-title-row">
-                        <div className="final-title">매수 후보 (Selection)</div>
+                    <div className="final-head">
+                      <div>
+                        <div className="filter-tag">Final</div>
+                        <div className="filter-title-row">
+                          <div className="final-title">매수 후보 (Selection)</div>
                         <button
                           type="button"
                           className="help-icon"
@@ -604,12 +605,13 @@ function App() {
                         >
                           ?
                         </button>
+                        </div>
+                        <div className="final-duration">6개월 정도의 기간에서 수익 실현을 권장합니다.</div>
+                        {openHelp === 'final' ? (
+                          <div className="help-bubble">{stageHelp.final}</div>
+                        ) : null}
+                        <div className="filter-criteria">{formatStageValue(stageMap.final)}</div>
                       </div>
-                      {openHelp === 'final' ? (
-                        <div className="help-bubble">{stageHelp.final}</div>
-                      ) : null}
-                      <div className="filter-criteria">{formatStageValue(stageMap.final)}</div>
-                    </div>
                     <div className="filter-count">{Number(stageMap.final?.count || candidates.length || 0)}</div>
                   </div>
 
