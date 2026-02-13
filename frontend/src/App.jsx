@@ -4,6 +4,7 @@ import {
   fetchSectors,
   fetchPrices,
   fetchRealtimePrice,
+  fetchSelectionRealtimePrices,
   fetchSelection,
   fetchSelectionFilters,
   updateSelectionFilterToggle
@@ -76,6 +77,7 @@ function App() {
   const [pricesLoading, setPricesLoading] = useState(false)
   const [days, setDays] = useState(252)
   const [realtimePrice, setRealtimePrice] = useState(null)
+  const [candidateLivePrices, setCandidateLivePrices] = useState({})
   const chartWheelRef = useRef(null)
 
   const [filterToggles, setFilterToggles] = useState({ min_amount: true, liquidity: true, disparity: true })
@@ -216,6 +218,9 @@ function App() {
   // 실시간 가격은 팝업이 열려 있을 때만 1분 주기로 갱신
   useEffect(() => {
     if (!selected || !modalOpen) return
+    if (!isSelectedCandidate) return
+    const code = String(selected.code || '')
+    if (code && candidateLivePrices?.[code]?.price !== null && candidateLivePrices?.[code]?.price !== undefined) return
     const poll = () => {
       fetchRealtimePrice(selected.code).then(data => {
         if (data && data.price !== null && data.price !== undefined) setRealtimePrice(data.price)
@@ -224,7 +229,32 @@ function App() {
     poll()
     const id = setInterval(poll, 60000)
     return () => clearInterval(id)
-  }, [selected, modalOpen])
+  }, [selected, modalOpen, isSelectedCandidate, candidateLivePrices])
+
+  // 후보 종목만 실시간 가격을 갱신한다(WS -> 서버 캐시). 비후보는 current price 표시/요청을 하지 않는다.
+  useEffect(() => {
+    const codes = candidateCodesKey ? candidateCodesKey.split(',').filter(Boolean) : []
+    if (!codes.length) {
+      setCandidateLivePrices({})
+      return
+    }
+    let cancelled = false
+    const poll = () => {
+      fetchSelectionRealtimePrices(codes)
+        .then((payload) => {
+          if (cancelled) return
+          const prices = payload && typeof payload === 'object' ? (payload.prices || {}) : {}
+          setCandidateLivePrices(prices || {})
+        })
+        .catch(() => {})
+    }
+    poll()
+    const id = setInterval(poll, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [candidateCodesKey])
 
   useEffect(() => {
     setSelected(null)
@@ -279,6 +309,12 @@ function App() {
   }, [universe, filter, sectorFilter, search])
 
   const candidates = useMemo(() => asArray(selection?.candidates), [selection])
+  const candidateCodesKey = useMemo(() => candidates.map((c) => c?.code).filter(Boolean).join(','), [candidates])
+  const isSelectedCandidate = useMemo(() => {
+    if (!selected) return false
+    const code = String(selected.code || '')
+    return candidates.some((c) => String(c?.code || '') === code)
+  }, [selected, candidates])
   const selectionStages = useMemo(() => asArray(selection?.stages), [selection])
   const selectionStageItems = selection?.stage_items && typeof selection.stage_items === 'object' ? selection.stage_items : {}
 
@@ -306,11 +342,16 @@ function App() {
   }, [chartData, zoomedData])
 
   const livePrice = useMemo(() => {
+    if (selected) {
+      const code = String(selected.code || '')
+      const wsLive = candidateLivePrices?.[code]?.price
+      if (wsLive !== null && wsLive !== undefined) return wsLive
+    }
     if (realtimePrice !== null && realtimePrice !== undefined) return realtimePrice
     if (!selected) return null
     const cand = candidates.find(c => c.code === selected.code)
     return cand ? cand.close : latest?.close
-  }, [selected, candidates, latest, realtimePrice])
+  }, [selected, candidates, latest, realtimePrice, candidateLivePrices])
 
   const rangeOptions = [
     { label: '1Y', value: 252 },
@@ -729,13 +770,52 @@ function App() {
                             </td>
                             <td>
                               <div className="candidate-metric">
-                                <strong>{formatCurrency(r.close)}</strong>
+                                <strong>{formatCurrency(candidateLivePrices?.[r.code]?.price ?? r.close)}</strong>
                               </div>
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+
+                <div className="panel mobile-stock-panel" aria-label="주식목록(모바일)">
+                  <div className="panel-head">
+                    <div>
+                      <h2>주식목록</h2>
+                      <p>{filtered.length} 종목</p>
+                    </div>
+                  </div>
+                  <div className="search">
+                    <input
+                      placeholder="코드/종목명/섹터 검색"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                    />
+                  </div>
+                  <div className="list">
+                    {filtered.map((row) => (
+                      <button
+                        key={row.code}
+                        className={`list-row ${selected?.code === row.code ? 'active' : ''}`}
+                        onClick={() => {
+                          setSelected(row)
+                          setModalOpen(true)
+                        }}
+                      >
+                        <div>
+                          <div className="ticker">{row.code}</div>
+                          <div className="name">{row.name}</div>
+                          <div className="meta">
+                            <span>{row.sector_name || 'UNKNOWN'}</span>
+                            {row.industry_name ? <span className="dot">•</span> : null}
+                            {row.industry_name ? <span>{row.industry_name}</span> : null}
+                          </div>
+                        </div>
+                        <div className="tag">{row.market}</div>
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -786,11 +866,13 @@ function App() {
                   <div className="delta-value" style={{ opacity: 0.8, fontSize: '16px' }}>{formatCurrency(prev?.close)}</div>
                   <div className="delta-sub">{prev?.date || '-'}</div>
                 </div>
-                <div>
-                  <div className="chart-title" style={{ color: 'var(--accent-2)' }}>Current Price</div>
-                  <div className="delta-value">{formatCurrency(livePrice)}</div>
-                  <div className="delta-sub">{latest?.date || '-'}</div>
-                </div>
+                {isSelectedCandidate ? (
+                  <div>
+                    <div className="chart-title" style={{ color: 'var(--accent-2)' }}>Current Price</div>
+                    <div className="delta-value">{formatCurrency(livePrice)}</div>
+                    <div className="delta-sub">{latest?.date || '-'}</div>
+                  </div>
+                ) : null}
                 <div className="delta">
                   <div className="chart-title">Change</div>
                   <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>

@@ -10,6 +10,8 @@ export const fetchUniverse = (sector) => api.get('/universe', { params: sector ?
 export const fetchSectors = () => api.get('/sectors').then(r => r.data);
 export const fetchPrices = (code, days = 60) => api.get('/prices', { params: { code, days } }).then(r => r.data);
 export const fetchRealtimePrice = (code) => api.get('/prices/realtime', { params: { code } }).then(r => r.data);
+export const fetchSelectionRealtimePrices = (codes) =>
+  api.get('/selection/realtime_prices', { params: { codes: Array.isArray(codes) ? codes.join(',') : '' } }).then(r => r.data);
 export const fetchStatus = () => api.get('/status').then(r => r.data);
 export const fetchSelection = () => api.get('/selection').then(r => r.data);
 export const fetchSelectionFilters = () => api.get('/selection_filters').then(r => r.data);

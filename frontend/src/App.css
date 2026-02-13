@@ -310,6 +310,10 @@ body {
   top: 20px;
 }
 
+.mobile-stock-panel {
+  display: none;
+}
+
 .search input {
   width: 100%;
   padding: 10px 12px;
@@ -1185,6 +1189,21 @@ body {
 
   .stock-panel.open {
     transform: translateY(0);
+  }
+
+  /* Mobile UX: show the stock list under candidates, not as an unreachable overlay. */
+  aside.stock-panel {
+    display: none;
+  }
+
+  .mobile-stock-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .mobile-stock-panel .list {
+    max-height: 55vh;
   }
 
   .close-panel-btn {

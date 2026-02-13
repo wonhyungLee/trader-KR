@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import logging
@@ -57,6 +58,15 @@ DISABLE_TRADING_ENDPOINTS = True
 _kis_price_client: Optional[KISPriceClient] = None
 _kis_price_client_error: Optional[Exception] = None
 _kis_price_client_lock = threading.Lock()
+
+# Candidate-only realtime prices (KIS WebSocket).
+# - We open a single WS connection lazily when candidates appear.
+# - Frontend polls our in-memory cache; non-candidates don't pay the realtime cost.
+_candidate_ws_lock = threading.Lock()
+_candidate_ws_targets: set[str] = set()
+_candidate_ws_prices: Dict[str, Dict[str, Any]] = {}
+_candidate_ws_thread: Optional[threading.Thread] = None
+_candidate_ws_health: Dict[str, Any] = {"last_error": None, "last_error_ts": 0.0, "last_ok_ts": 0.0}
 
 # Create DB and tables if missing
 _store = SQLiteStore(str(DB_PATH))
@@ -415,6 +425,80 @@ def _get_kis_price_client(settings: Dict[str, Any]) -> Optional[KISPriceClient]:
     return _kis_price_client
 
 
+def _normalize_code(code: Any) -> str:
+    return str(code or "").strip().zfill(6)
+
+
+def _set_candidate_ws_targets(codes: list[str]) -> None:
+    codes = [_normalize_code(c) for c in (codes or []) if str(c or "").strip()]
+    targets = set(codes)
+    with _candidate_ws_lock:
+        _candidate_ws_targets.clear()
+        _candidate_ws_targets.update(targets)
+    if targets:
+        _ensure_candidate_ws_thread()
+
+
+def _ensure_candidate_ws_thread() -> None:
+    global _candidate_ws_thread
+    with _candidate_ws_lock:
+        if _candidate_ws_thread is not None and _candidate_ws_thread.is_alive():
+            return
+
+        def _thread_main():
+            try:
+                asyncio.run(_candidate_ws_loop())
+            except Exception as exc:
+                logging.exception("candidate ws loop crashed: %s", exc)
+                with _candidate_ws_lock:
+                    _candidate_ws_health["last_error"] = str(exc)
+                    _candidate_ws_health["last_error_ts"] = time.time()
+
+        _candidate_ws_thread = threading.Thread(target=_thread_main, daemon=True)
+        _candidate_ws_thread.start()
+
+
+async def _candidate_ws_loop() -> None:
+    from src.monitor.state_store import StateStore
+    from src.monitor.ws_client import KISWebSocketClient
+
+    settings = load_settings()
+    state = StateStore("data/candidate_ws_state.json")
+
+    def on_tick(code: str, price: float, ts: Optional[str] = None, source: str = "ws") -> None:
+        if not code or price is None:
+            return
+        try:
+            price_f = float(price)
+        except Exception:
+            return
+        if price_f <= 0:
+            return
+        with _candidate_ws_lock:
+            _candidate_ws_prices[_normalize_code(code)] = {
+                "price": price_f,
+                "ts": ts,
+                "source": source,
+                "updated_at": time.time(),
+            }
+            _candidate_ws_health["last_ok_ts"] = time.time()
+
+    ws_client = KISWebSocketClient(settings, state, on_tick)
+
+    async def target_loop():
+        last_seen: set[str] = set()
+        while True:
+            with _candidate_ws_lock:
+                targets = set(_candidate_ws_targets)
+            if targets != last_seen:
+                logging.info("candidate ws targets=%s", ",".join(sorted(targets)) if targets else "(none)")
+                last_seen = targets
+            await ws_client.set_targets(targets)
+            await asyncio.sleep(1.0)
+
+    await asyncio.gather(ws_client.run_forever(), target_loop())
+
+
 def _latest_price_map(conn: sqlite3.Connection, codes: list[str]) -> Dict[str, Dict[str, Any]]:
     if not codes:
         return {}
@@ -757,6 +841,12 @@ def _build_selection_snapshot(
             "industry_name": row.get("industry_name"),
         })
 
+    # Update candidate-only realtime WS targets.
+    try:
+        _set_candidate_ws_targets([c.get("code") for c in candidates if isinstance(c, dict)])
+    except Exception:
+        pass
+
     stages = [
         {"key": "universe", "label": "Universe", "count": total, "value": len(codes), "enabled": True},
         {"key": "min_amount", "label": "Amount Filter", "count": len(stage_min), "value": min_amount, "enabled": min_enabled},
@@ -991,6 +1081,33 @@ def prices_realtime():
             conn.close()
 
     return jsonify({"code": code, "price": price, "source": source, "date": date})
+
+
+@app.get("/selection/realtime_prices")
+def selection_realtime_prices():
+    codes_param = request.args.get("codes") or ""
+    codes: list[str]
+    if codes_param.strip():
+        parts = [p.strip() for p in str(codes_param).split(",") if p.strip()]
+        # basic abuse guard
+        parts = parts[:50]
+        codes = [_normalize_code(p) for p in parts]
+    else:
+        with _candidate_ws_lock:
+            codes = sorted(_candidate_ws_targets)
+
+    with _candidate_ws_lock:
+        prices = {c: _candidate_ws_prices.get(c) for c in codes}
+        health = dict(_candidate_ws_health)
+        running = bool(_candidate_ws_thread is not None and _candidate_ws_thread.is_alive())
+    return jsonify(
+        {
+            "codes": codes,
+            "prices": prices,
+            "ws": {"running": running, "health": health},
+            "updated_at": time.time(),
+        }
+    )
 
 
 @app.get("/signals")
