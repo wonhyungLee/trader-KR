@@ -1,9 +1,8 @@
 import axios from 'axios';
 
-// Vite 프록시 또는 Nginx 설정에 맞춰 /api 접두사 사용 여부 결정
-// /bnf 또는 루트 둘 다 대응하도록 현재 경로 기반으로 기본값 결정
-const inferredBase = window.location.pathname.startsWith('/bnf') ? '/bnf' : '';
-const baseURL = import.meta.env.VITE_API_BASE ? import.meta.env.VITE_API_BASE : inferredBase;
+// Default: call API on the same origin root (works even if the frontend is served under /bnf).
+// If your deployment proxies API under a prefix, set VITE_API_BASE (e.g. "/bnf").
+const baseURL = import.meta.env.VITE_API_BASE ? import.meta.env.VITE_API_BASE : '';
 const api = axios.create({ baseURL });
 
 export const fetchUniverse = (sector) => api.get('/universe', { params: sector ? { sector } : {} }).then(r => r.data);
@@ -18,7 +17,13 @@ export const fetchSelectionFilters = () => api.get('/selection_filters').then(r 
 export const updateSelectionFilterToggle = (key, enabled, password) =>
   api.post('/selection_filters/toggle', { key, enabled, password }).then(r => r.data);
 export const fetchCoupangBanner = ({ keyword, limit } = {}) =>
-  api.get('/api/coupang-banner', { params: { ...(keyword ? { keyword } : {}), ...(limit ? { limit } : {}) } }).then(r => r.data);
+  api
+    .get('/api/coupang-banner', { params: { ...(keyword ? { keyword } : {}), ...(limit ? { limit } : {}) } })
+    .then((r) => {
+      const data = r?.data
+      if (data && typeof data === 'object') return data
+      return { error: 'invalid_response', items: [] }
+    });
 export const fetchPortfolio = () => api.get('/portfolio').then(r => r.data);
 export const fetchPlans = () => api.get('/plans').then(r => r.data);
 export const fetchAccount = () => api.get('/account').then(r => r.data);

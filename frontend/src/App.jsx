@@ -183,11 +183,16 @@ function App() {
     fetchCoupangBanner({ limit: 3 })
       .then((payload) => {
         if (cancelled) return
-        setCoupangBanner(payload && typeof payload === 'object' ? payload : null)
+        setCoupangBanner(payload && typeof payload === 'object' ? payload : { error: 'invalid_response', items: [] })
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) return
-        setCoupangBanner(null)
+        const status = err?.response?.status
+        let code = 'network_error'
+        if (status === 404) code = 'not_found'
+        else if (typeof status === 'number' && status >= 500) code = 'server_error'
+        else if (typeof status === 'number') code = 'request_error'
+        setCoupangBanner({ error: code, error_message: status ? `HTTP ${status}` : '', items: [] })
       })
       .finally(() => {
         if (cancelled) return
@@ -204,6 +209,11 @@ function App() {
     const err = coupangBanner?.error
     if (err === 'missing_config') return '서버에 쿠팡 파트너스 API 키 설정이 필요합니다. (쿠팡파트너스api정보.txt)'
     if (err === 'api_error') return '쿠팡 추천 상품을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.'
+    if (err === 'not_found') return '쿠팡 광고 API가 서버에 없습니다. (배포/서버 재시작 필요)'
+    if (err === 'invalid_response') return '쿠팡 광고 API 응답이 올바르지 않습니다.'
+    if (err === 'server_error') return '쿠팡 광고 서버 오류가 발생했습니다.'
+    if (err === 'request_error') return '쿠팡 광고 요청이 실패했습니다.'
+    if (err === 'network_error') return '쿠팡 광고 서버에 연결할 수 없습니다.'
     return '추천 상품을 불러오지 못했습니다.'
   }, [coupangBanner])
 
@@ -1185,7 +1195,12 @@ function App() {
 	                  ))
 	                )}
 	                {!coupangBannerLoading && coupangItems.length === 0 ? (
-	                  <div className="cpb-empty">{coupangEmptyMessage}</div>
+	                  <div className="cpb-empty">
+	                    <div>{coupangEmptyMessage}</div>
+	                    {coupangBanner?.error_message ? (
+	                      <div className="cpb-empty-sub">{coupangBanner.error_message}</div>
+	                    ) : null}
+	                  </div>
 	                ) : null}
 	              </div>
 

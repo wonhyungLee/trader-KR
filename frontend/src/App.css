@@ -1189,7 +1189,9 @@ body {
   .modal-panel {
     width: 100vw;
     height: 100vh;
+    height: 100dvh;
     max-height: 100vh;
+    max-height: 100dvh;
     border-radius: 0;
     padding: calc(14px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
   }
@@ -1882,4 +1884,10 @@ body {
   padding: 8px 4px;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.cpb-empty-sub {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.85);
 }
