@@ -417,7 +417,10 @@ function App() {
         <div className="brand">
           <span className="brand-kicker">STOCK SELECTION</span>
           <h1 className="brand-title">BNF-K Selection Desk</h1>
-          <p className="brand-sub">주식 종목을 선별하고 신규 후보를 디스코드로 알림합니다.</p>
+          <p className="brand-sub">
+            주식 종목을 선별하고 신규 후보를 디스코드로 알림합니다.
+            <span className="hold-note">보유 권장 기간: 6개월</span>
+          </p>
         </div>
         <div className="controls">
           <div className="segmented">
@@ -436,6 +439,14 @@ function App() {
               ))}
             </select>
           </div>
+          <a
+            className="discord-btn"
+            href="https://discord.gg/XHE5kKvGU"
+            target="_blank"
+            rel="noreferrer"
+          >
+            디스코드 알람받기
+          </a>
           <button className="primary-btn" onClick={() => loadData()}>Refresh</button>
           <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
         </div>

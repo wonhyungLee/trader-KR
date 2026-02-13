@@ -51,6 +51,8 @@ _selection_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 SELECTION_NOTIFY_PATH = Path("data/selection_notify_state.json")
 SELECTION_NOTIFY_COOLDOWN_SEC = int(os.getenv("SELECTION_NOTIFY_COOLDOWN_SEC", "300"))
 SELECTION_NOTIFY_INTERVAL_SEC = int(os.getenv("SELECTION_NOTIFY_INTERVAL_SEC", "60"))
+SELECTION_NOTIFY_REPEAT_SEC = int(os.getenv("SELECTION_NOTIFY_REPEAT_SEC", "3600"))
+_selection_notify_health: Dict[str, Any] = {"last_error": None, "last_error_ts": 0.0, "last_ok_ts": 0.0}
 DISABLE_TRADING_ENDPOINTS = True
 _kis_price_client: Optional[KISPriceClient] = None
 _kis_price_client_error: Optional[Exception] = None
@@ -139,7 +141,13 @@ def _save_filter_toggles(toggles: Dict[str, bool], path: Path = FILTER_TOGGLE_PA
 
 
 def _load_selection_notify_state(path: Path = SELECTION_NOTIFY_PATH) -> Dict[str, Any]:
-    default = {"last_codes": [], "last_ts": 0.0, "pending_codes": []}
+    default = {
+        "last_codes": [],
+        "last_ts": 0.0,  # last time we sent "new codes" notification (cooldown gate)
+        "pending_codes": [],
+        "last_sent_codes": [],  # last codes we recommended (new or repeat)
+        "last_sent_ts": 0.0,  # last time we sent any recommendation
+    }
     if not path.exists():
         return default
     try:
@@ -161,6 +169,8 @@ def _save_selection_notify_state(payload: Dict[str, Any], path: Path = SELECTION
         "last_codes": payload.get("last_codes") or [],
         "last_ts": float(payload.get("last_ts") or 0.0),
         "pending_codes": payload.get("pending_codes") or [],
+        "last_sent_codes": payload.get("last_sent_codes") or [],
+        "last_sent_ts": float(payload.get("last_sent_ts") or 0.0),
     }
     path.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -180,7 +190,7 @@ def _format_candidate_line(code: str, info: Dict[str, Any]) -> str:
     if close is not None:
         parts.append(f"{close:,.0f}")
     if disp is not None:
-        parts.append(f"disp={disp:.2f}")
+        parts.append(f"disp={disp * 100:+.2f}%")
     return " ".join([p for p in parts if p])
 
 
@@ -189,7 +199,14 @@ def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) 
     now_ts = time.time()
     state_exists = SELECTION_NOTIFY_PATH.exists()
     if not candidates:
-        _save_selection_notify_state({"last_codes": [], "last_ts": 0.0, "pending_codes": []})
+        state = _load_selection_notify_state()
+        _save_selection_notify_state({
+            "last_codes": [],
+            "last_ts": float(state.get("last_ts") or 0.0),
+            "pending_codes": [],
+            "last_sent_codes": state.get("last_sent_codes") or [],
+            "last_sent_ts": float(state.get("last_sent_ts") or 0.0),
+        })
         return
     codes = [str(c.get("code") or "").zfill(6) for c in candidates if c.get("code")]
     if not codes:
@@ -198,37 +215,107 @@ def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) 
     state = _load_selection_notify_state()
     last_codes = set(state.get("last_codes") or [])
     pending = list(state.get("pending_codes") or [])
+    last_sent_codes = list(state.get("last_sent_codes") or [])
+    last_sent_ts = float(state.get("last_sent_ts") or 0.0)
+
+    def _system_error_line() -> str:
+        err = _selection_notify_health.get("last_error")
+        err_ts = float(_selection_notify_health.get("last_error_ts") or 0.0)
+        ok_ts = float(_selection_notify_health.get("last_ok_ts") or 0.0)
+        if err and err_ts >= ok_ts and err_ts > 0 and (now_ts - err_ts) < 86400:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(err_ts))
+            text = str(err).strip().replace("\n", " ")
+            if len(text) > 180:
+                text = text[:180] + "..."
+            return f"system_error: {text} (at {when})"
+        return "system_error: none"
+
+    def _site_line() -> str:
+        url = settings.get("site_url") or settings.get("site", {}).get("url") or ""
+        url = str(url).strip()
+        if not url:
+            return ""
+        return f"site: {url}"
+
+    info_map = {str(c.get("code") or "").zfill(6): c for c in candidates}
+
+    def _build_message(label: str, rec_codes: list[str]) -> str:
+        header = f"[selection] 추천({label}) total={len(codes)}"
+        if snapshot.get("date"):
+            header += f" date={snapshot.get('date')}"
+        lines = [header]
+        for idx, code in enumerate(rec_codes[:12], start=1):
+            line = _format_candidate_line(code, info_map.get(code, {}))
+            if line:
+                lines.append(f"{idx}. {line}")
+        if len(lines) == 1:
+            lines.append("(추천 종목 없음)")
+        lines.append(_system_error_line())
+        site = _site_line()
+        if site:
+            lines.append(site)
+        return "\n".join(lines)
 
     # Initialize state without sending notifications on first run
     if not last_codes and not state_exists:
-        _save_selection_notify_state({"last_codes": codes, "last_ts": now_ts, "pending_codes": []})
+        seed = codes[: min(12, len(codes))]
+        _save_selection_notify_state({
+            "last_codes": codes,
+            "last_ts": float(state.get("last_ts") or 0.0),
+            "pending_codes": [],
+            "last_sent_codes": seed,
+            "last_sent_ts": now_ts,
+        })
         return
 
     new_codes = [c for c in codes if c not in last_codes]
     if new_codes:
         pending = list(dict.fromkeys(pending + new_codes))
 
-    if not pending:
-        state["last_codes"] = codes
-        _save_selection_notify_state(state)
+    # 1) New codes: notify as soon as cooldown allows.
+    if pending:
+        cooldown_ok = now_ts - float(state.get("last_ts") or 0.0) >= SELECTION_NOTIFY_COOLDOWN_SEC
+        if not cooldown_ok:
+            _save_selection_notify_state({
+                "last_codes": codes,
+                "last_ts": float(state.get("last_ts") or 0.0),
+                "pending_codes": pending,
+                "last_sent_codes": last_sent_codes,
+                "last_sent_ts": last_sent_ts,
+            })
+            return
+
+        msg = _build_message("신규", pending)
+        _async_notify(settings, msg)
+        _save_selection_notify_state({
+            "last_codes": codes,
+            "last_ts": now_ts,
+            "pending_codes": [],
+            "last_sent_codes": pending[:12],
+            "last_sent_ts": now_ts,
+        })
         return
 
-    cooldown_ok = now_ts - float(state.get("last_ts") or 0.0) >= SELECTION_NOTIFY_COOLDOWN_SEC
-    if not cooldown_ok:
-        _save_selection_notify_state({"last_codes": codes, "last_ts": state.get("last_ts") or 0.0, "pending_codes": pending})
+    # 2) No new codes: periodically re-recommend the last sent (keeps the channel alive without spamming).
+    repeat_sec = SELECTION_NOTIFY_REPEAT_SEC
+    repeat_due = repeat_sec > 0 and (now_ts - last_sent_ts) >= repeat_sec
+    if repeat_due and last_sent_codes:
+        rec = [c for c in last_sent_codes if c in info_map]
+        if not rec:
+            rec = codes[: min(12, len(codes))]
+        msg = _build_message("최근", rec)
+        _async_notify(settings, msg)
+        _save_selection_notify_state({
+            "last_codes": codes,
+            "last_ts": float(state.get("last_ts") or 0.0),
+            "pending_codes": [],
+            "last_sent_codes": rec[:12],
+            "last_sent_ts": now_ts,
+        })
         return
 
-    info_map = {str(c.get("code") or "").zfill(6): c for c in candidates}
-    lines = [_format_candidate_line(code, info_map.get(code, {})) for code in pending[:12]]
-    detail = ", ".join([line for line in lines if line])
-    msg = f"[selection] new {len(pending)} / total {len(codes)}"
-    if snapshot.get("date"):
-        msg += f" date={snapshot.get('date')}"
-    if detail:
-        msg += f" | {detail}"
-
-    _async_notify(settings, msg)
-    _save_selection_notify_state({"last_codes": codes, "last_ts": now_ts, "pending_codes": []})
+    state["last_codes"] = codes
+    _save_selection_notify_state(state)
 
 
 def _disabled_response():
@@ -244,10 +331,13 @@ def _selection_notify_loop() -> None:
             settings = load_settings()
             conn = get_conn()
             try:
-                _build_selection_snapshot(conn, settings, force=True)
+                _build_selection_snapshot(conn, settings, force=True, notify=True)
+                _selection_notify_health["last_ok_ts"] = time.time()
             finally:
                 conn.close()
         except Exception as exc:
+            _selection_notify_health["last_error"] = str(exc)
+            _selection_notify_health["last_error_ts"] = time.time()
             logging.warning("selection notify loop error: %s", exc)
         time.sleep(max(10, interval))
 
@@ -487,7 +577,12 @@ def _ensure_latest_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
+def _build_selection_snapshot(
+    conn: sqlite3.Connection,
+    settings: Dict[str, Any],
+    force: bool = False,
+    notify: bool = False,
+) -> Dict[str, Any]:
     now_ts = time.time()
 
     def _cache_set(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -680,7 +775,8 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
     }
     # Ensure JSON-safe values (no NaN/Inf)
     data = _json_sanitize(data)
-    _maybe_notify_selection(settings, data)
+    if notify:
+        _maybe_notify_selection(settings, data)
     return _cache_set(data)
 
 

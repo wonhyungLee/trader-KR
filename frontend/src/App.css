@@ -74,12 +74,39 @@ body {
   line-height: 1.6;
 }
 
+.hold-note {
+  display: block;
+  margin-top: 6px;
+  color: rgba(229, 231, 235, 0.92);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-end;
   justify-content: flex-end;
+}
+
+.discord-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  border: none;
+  background: linear-gradient(120deg, #5865f2, #38bdf8);
+  color: #0b0f14;
+  font-weight: 800;
+  padding: 10px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 12px 25px rgba(88, 101, 242, 0.16);
+}
+
+.discord-btn:hover {
+  filter: brightness(1.05);
 }
 
 .refresh-meta {
