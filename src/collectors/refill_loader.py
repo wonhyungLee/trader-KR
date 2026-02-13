@@ -26,7 +26,22 @@ class AuthForbiddenError(Exception):
 
 def _is_auth_forbidden_error(exc: Exception) -> bool:
     msg = str(exc)
-    return "403" in msg and "tokenP" in msg
+    low = msg.lower()
+    if "429" in msg:
+        return True
+    if "403" in msg and "tokenp" in low:
+        return True
+    return any(
+        key in low
+        for key in (
+            "rate limit",
+            "rate-limited",
+            "too many requests",
+            "too many request",
+            "속도 제한",
+            "과도한 요청",
+        )
+    )
 
 def read_universe(paths: Iterable[str]) -> List[str]:
     codes: List[str] = []

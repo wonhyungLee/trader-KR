@@ -120,7 +120,22 @@ class AuthForbiddenError(Exception):
 
 def _is_auth_forbidden_error(exc: Exception) -> bool:
     msg = str(exc)
-    return "403" in msg and "tokenP" in msg
+    low = msg.lower()
+    if "429" in msg:
+        return True
+    if "403" in msg and "tokenp" in low:
+        return True
+    return any(
+        key in low
+        for key in (
+            "rate limit",
+            "rate-limited",
+            "too many requests",
+            "too many request",
+            "속도 제한",
+            "과도한 요청",
+        )
+    )
 
 
 def _safe_fetch(label: str, func):
@@ -138,7 +153,7 @@ def load_codes(store: SQLiteStore) -> List[str]:
     if codes:
         return codes
     # fallback to universe CSVs if DB is empty
-    paths = ["data/universe_kospi100.csv", "data/universe_kosdaq150.csv"]
+    paths = ["data/universe_kospi200.csv", "data/universe_kosdaq150.csv"]
     out: List[str] = []
     for p in paths:
         try:

@@ -240,6 +240,24 @@ class KISBroker:
         except Exception:
             pass
 
+    def _is_rate_limited(self, status: Optional[int], response_text: str) -> bool:
+        if status == 429:
+            return True
+        msg = (response_text or "").lower()
+        if not msg:
+            return False
+        return any(
+            key in msg
+            for key in (
+                "rate limit",
+                "rate-limited",
+                "too many requests",
+                "too many request",
+                "속도 제한",
+                "초당",
+            )
+        )
+
     def _cooldown_on_auth_forbidden(self, reason: str):
         cooldown = self.auth_forbidden_cooldown_sec
         if cooldown <= 0:
@@ -251,10 +269,11 @@ class KISBroker:
             if elapsed < cooldown:
                 sleep_sec = cooldown - elapsed
         self._auth_forbidden_last_ts = time.time()
-        logging.warning("KIS 403 (%s). Cooling down %.1fs and clearing token cache.", reason, sleep_sec)
+        logging.warning("KIS API blocked (%s). Cooling down %.1fs and refreshing sessions/cache.", reason, sleep_sec)
         time.sleep(sleep_sec)
         self.clear_token_cache()
         self.reset_sessions()
+        self._consecutive_errors = 0
 
     # Proxy properties for backward compatibility
     @property
@@ -310,9 +329,13 @@ class KISBroker:
                     token = sess.ensure_token()
                 except HTTPError as exc:
                     status = exc.response.status_code if getattr(exc, "response", None) else None
+                    msg = str(exc)
                     if status == 403:
                         self._cooldown_on_auth_forbidden("token")
                         token = sess.ensure_token()
+                    elif status == 429 or self._is_rate_limited(status, msg):
+                        self._cooldown_on_auth_forbidden("token_rate_limit")
+                        continue
                     else:
                         raise
 
@@ -339,6 +362,7 @@ class KISBroker:
                     resp = sess.session.post(url, headers=headers, params=params, data=data, json=json_body, timeout=timeout)
 
                 # KIS quirk: sometimes returns 500 for expired token
+                response_text = resp.text or ""
                 is_token_expired = False
                 if resp.status_code == 500:
                     try:
@@ -347,6 +371,10 @@ class KISBroker:
                             is_token_expired = True
                     except Exception:
                         pass
+
+                if self._is_rate_limited(resp.status_code, response_text):
+                    self._cooldown_on_auth_forbidden("api_rate_limit")
+                    raise HTTPError(f"{resp.status_code} retryable", response=resp)
 
                 if (resp.status_code in (401, 403) or is_token_expired):
                     if resp.status_code == 403:
@@ -371,6 +399,10 @@ class KISBroker:
                 status = exc.response.status_code if getattr(exc, "response", None) else None
                 if status == 403:
                     self._cooldown_on_auth_forbidden("api")
+                    last_exc = exc
+                    continue
+                if status == 429 or self._is_rate_limited(status, str(exc)):
+                    self._cooldown_on_auth_forbidden("api_rate_limit")
                     last_exc = exc
                     continue
                 if not is_retryable_status(status):
