@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
+import requests
 
 from src.brokers.kis_broker import KISBroker
 from src.monitor.scanner import Scanner
@@ -42,6 +44,43 @@ def load_universe(settings: dict) -> List[str]:
         return uniq
 
     return []
+
+
+def _normalize_codes(codes: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for code in codes:
+        if not code:
+            continue
+        norm = str(code).strip().zfill(6)
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def fetch_selection_codes(settings: dict) -> List[str]:
+    monitor = settings.get("monitor", {}) or {}
+    api_url = monitor.get("selection_api") or os.getenv("SELECTION_API_URL")
+    if not api_url:
+        site_url = settings.get("site_url") or ""
+        if site_url:
+            api_url = site_url.rstrip("/") + "/selection"
+        else:
+            api_url = "http://127.0.0.1:5001/selection"
+    try:
+        resp = requests.get(api_url, timeout=5)
+        resp.raise_for_status()
+        payload = resp.json() if resp.content else {}
+        candidates = payload.get("candidates") or []
+        codes = [c.get("code") for c in candidates if isinstance(c, dict)]
+        if not codes:
+            final_items = (payload.get("stage_items") or {}).get("final") or []
+            codes = [c.get("code") for c in final_items if isinstance(c, dict)]
+        return _normalize_codes(codes)
+    except Exception as exc:
+        logging.warning("selection fetch failed (%s): %s", api_url, exc)
+        return []
 
 
 def load_baseline(settings: dict) -> Dict[str, Dict]:
@@ -88,7 +127,6 @@ async def monitor_loop():
         handlers=[logging.StreamHandler()],
     )
 
-    universe = load_universe(settings)
     baseline = load_baseline(settings)
     state = StateStore(monitor_cfg.get("state_path", "data/monitor_state.json"))
     signal_engine = SignalEngine(settings, baseline, state)
@@ -99,13 +137,25 @@ async def monitor_loop():
 
     ws_task = asyncio.create_task(ws_client.run_forever())
     scan_interval = int(monitor_cfg.get("scan_interval_sec", 60))
+    last_selected: List[str] = []
 
     try:
         while True:
-            snapshot = await asyncio.to_thread(scanner.scan_once, universe)
+            selected = fetch_selection_codes(settings)
+            if selected:
+                last_selected = selected
+            else:
+                selected = last_selected
+
+            if not selected:
+                logging.info("no selection candidates; skip scan")
+                await asyncio.sleep(scan_interval)
+                continue
+
+            snapshot = await asyncio.to_thread(scanner.scan_once, selected)
             if snapshot:
                 signal_engine.on_snapshot(snapshot)
-                targets = sub_manager.compute_targets(snapshot)
+                targets = sub_manager.targets_from_selection(selected)
                 await ws_client.set_targets(targets)
                 state.save()
             await asyncio.sleep(scan_interval)

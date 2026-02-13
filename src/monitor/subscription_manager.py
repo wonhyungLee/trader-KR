@@ -61,3 +61,18 @@ class SubscriptionManager:
             if self.state.can_resubscribe(code, self.subscribe_cooldown):
                 targets.add(code)
         return targets
+
+    def targets_from_selection(self, selected_codes: List[str]) -> Set[str]:
+        targets: Set[str] = set()
+        for raw in selected_codes:
+            code = str(raw).strip().zfill(6)
+            if not code:
+                continue
+            if len(targets) >= self.max_ws_subs:
+                break
+            if code in self.state.current_subs:
+                targets.add(code)
+                continue
+            if self.state.can_resubscribe(code, self.subscribe_cooldown):
+                targets.add(code)
+        return targets

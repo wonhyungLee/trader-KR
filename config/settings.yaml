@@ -56,6 +56,7 @@ monitor:
   ws_subscribe_interval_sec: 0.2
   subscribe_cooldown_sec: 180
   alert_cooldown_sec: 600
+  selection_api: "http://127.0.0.1/selection"
   universe_paths:
     - "data/universe_kospi200.csv"
     - "data/universe_kosdaq150.csv"
