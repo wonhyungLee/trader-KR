@@ -669,6 +669,9 @@ function App() {
                         </button>
                         </div>
                         <div className="final-duration">6개월 정도의 기간에서 수익 실현을 권장합니다.</div>
+                        <div className="final-duration">
+                          기대수익률: 5일 0.5% / 10일 0.8% / 1개월 1% / 3개월 4.5% / 6개월 8.45%
+                        </div>
                         {openHelp === 'final' ? (
                           <div className="help-bubble">{stageHelp.final}</div>
                         ) : null}
