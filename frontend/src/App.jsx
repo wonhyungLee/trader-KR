@@ -92,12 +92,35 @@ function App() {
   const [updateKey, setUpdateKey] = useState(0)
   const prevCandidatesRef = useRef([])
 
+  const [isMobile, setIsMobile] = useState(() => {
+    try {
+      return window.matchMedia && window.matchMedia('(max-width: 768px)').matches
+    } catch {
+      return false
+    }
+  })
+  const [mobileTab, setMobileTab] = useState('candidates')
+
   const COUPANG_BANNER_HIDE_KEY = 'coupang_banner_hide_until'
   const COUPANG_BANNER_HIDE_MS = 6 * 60 * 60 * 1000
   const [showCoupangBanner, setShowCoupangBanner] = useState(false)
   const [coupangBannerLoading, setCoupangBannerLoading] = useState(false)
   const [coupangBanner, setCoupangBanner] = useState(null)
   const coupangBannerReshowTimerRef = useRef(null)
+
+  useEffect(() => {
+    const mq = window.matchMedia ? window.matchMedia('(max-width: 768px)') : null
+    if (!mq) return
+    const update = () => setIsMobile(Boolean(mq.matches))
+    update()
+    try {
+      mq.addEventListener('change', update)
+      return () => mq.removeEventListener('change', update)
+    } catch {
+      mq.addListener(update)
+      return () => mq.removeListener(update)
+    }
+  }, [])
 
   const hideCoupangBanner = useCallback(() => {
     const hideUntil = Date.now() + COUPANG_BANNER_HIDE_MS
@@ -176,6 +199,12 @@ function App() {
 
   const coupangItems = useMemo(() => asArray(coupangBanner?.items), [coupangBanner])
   const coupangPrimaryLink = coupangItems.length ? (coupangItems[0]?.link || '') : ''
+  const coupangEmptyMessage = useMemo(() => {
+    const err = coupangBanner?.error
+    if (err === 'missing_config') return '서버에 COUPANG 키 설정이 필요합니다.'
+    if (err === 'api_error') return '쿠팡 추천 상품을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.'
+    return '추천 상품을 불러오지 못했습니다.'
+  }, [coupangBanner])
 
   const startSelectionLoadingProgress = useCallback(() => {
     if (selectionLoadingTimerRef.current) {
@@ -644,53 +673,97 @@ function App() {
         </div>
 	      </header>
 
-	      <main className="layout">
-	        <aside id="stocks" className={`panel stock-panel ${isStockPanelOpen ? 'open' : ''}`}>
-	          <div className="panel-head">
-            <div>
-              <h2>주식목록</h2>
-              <p>{filtered.length} 종목</p>
-            </div>
-            <button className="close-panel-btn" onClick={() => setIsStockPanelOpen(false)}>×</button>
-          </div>
-          <div className="search">
-            <input
-              placeholder="코드/종목명/섹터 검색"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <div className="list">
-            {filtered.map((row) => (
-              <button
-                key={row.code}
-                className={`list-row ${selected?.code === row.code ? 'active' : ''}`}
-                onClick={() => {
-                  setSelected(row)
-                  setModalOpen(true)
-                }}
-              >
-                <div>
-                  <div className="ticker">{row.code}</div>
-                  <div className="name">{row.name}</div>
-                  <div className="meta">
-                    <span>{row.sector_name || 'UNKNOWN'}</span>
-                    {row.industry_name ? <span className="dot">•</span> : null}
-                    {row.industry_name ? <span>{row.industry_name}</span> : null}
-                  </div>
-                </div>
-                <div className="tag">{row.market}</div>
-              </button>
-            ))}
-          </div>
-        </aside>
+		      <main className="layout">
+		        {!isMobile ? (
+		          <aside id="stocks" className={`panel stock-panel ${isStockPanelOpen ? 'open' : ''}`}>
+		            <div className="panel-head">
+		              <div>
+		                <h2>주식목록</h2>
+		                <p>{filtered.length} 종목</p>
+		              </div>
+		              <button className="close-panel-btn" onClick={() => setIsStockPanelOpen(false)}>×</button>
+		            </div>
+		            <div className="search">
+		              <input
+		                placeholder="코드/종목명/섹터 검색"
+		                value={search}
+		                onChange={(e) => setSearch(e.target.value)}
+		              />
+		            </div>
+		            <div className="list">
+		              {filtered.map((row) => (
+		                <button
+		                  key={row.code}
+		                  className={`list-row ${selected?.code === row.code ? 'active' : ''}`}
+		                  onClick={() => {
+		                    setSelected(row)
+		                    setModalOpen(true)
+		                  }}
+		                >
+		                  <div>
+		                    <div className="ticker">{row.code}</div>
+		                    <div className="name">{row.name}</div>
+		                    <div className="meta">
+		                      <span>{row.sector_name || 'UNKNOWN'}</span>
+		                      {row.industry_name ? <span className="dot">•</span> : null}
+		                      {row.industry_name ? <span>{row.industry_name}</span> : null}
+		                    </div>
+		                  </div>
+		                  <div className="tag">{row.market}</div>
+		                </button>
+		              ))}
+		            </div>
+		          </aside>
+		        ) : null}
+	
+		        <section className="content-column">
+		          {isMobile && mobileTab === 'search' ? (
+		            <div className="panel mobile-stock-panel" aria-label="종목 검색">
+		              <div className="panel-head">
+		                <div>
+		                  <h2>종목 검색</h2>
+		                  <p>{filtered.length} 종목</p>
+		                </div>
+		              </div>
+		              <div className="search">
+		                <input
+		                  placeholder="코드/종목명/섹터 검색"
+		                  value={search}
+		                  onChange={(e) => setSearch(e.target.value)}
+		                />
+		              </div>
+		              <div className="list">
+		                {filtered.map((row) => (
+		                  <button
+		                    key={row.code}
+		                    className={`list-row ${selected?.code === row.code ? 'active' : ''}`}
+		                    onClick={() => {
+		                      setSelected(row)
+		                      setModalOpen(true)
+		                    }}
+		                  >
+		                    <div>
+		                      <div className="ticker">{row.code}</div>
+		                      <div className="name">{row.name}</div>
+		                      <div className="meta">
+		                        <span>{row.sector_name || 'UNKNOWN'}</span>
+		                        {row.industry_name ? <span className="dot">•</span> : null}
+		                        {row.industry_name ? <span>{row.industry_name}</span> : null}
+		                      </div>
+		                    </div>
+		                    <div className="tag">{row.market}</div>
+		                  </button>
+		                ))}
+		              </div>
+		            </div>
+		          ) : null}
 
-        <section className="content-column">
-          <section id="filters" className="panel section">
-            <div className="section-head">
-              <div>
-                <h2>주식 종목 선별 과정</h2>
-                <p>필터 1~3 통과 종목을 단계별로 확인합니다.</p>
+		          {!isMobile || mobileTab === 'candidates' ? (
+		            <section id="filters" className="panel section">
+	            <div className="section-head">
+	              <div>
+	                <h2>주식 종목 선별 과정</h2>
+	                <p>필터 1~3 통과 종목을 단계별로 확인합니다.</p>
               </div>
               <span className="section-meta">기준일 {selection?.date || '-'}</span>
             </div>
@@ -868,54 +941,60 @@ function App() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
-                </div>
+	                  </div>
+	                </div>
+	              </div>
+	            )}
+	            </section>
+		          ) : null}
 
-                <div className="panel mobile-stock-panel" aria-label="주식목록(모바일)">
-                  <div className="panel-head">
-                    <div>
-                      <h2>주식목록</h2>
-                      <p>{filtered.length} 종목</p>
-                    </div>
-                  </div>
-                  <div className="search">
-                    <input
-                      placeholder="코드/종목명/섹터 검색"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                  </div>
-                  <div className="list">
-                    {filtered.map((row) => (
-                      <button
-                        key={row.code}
-                        className={`list-row ${selected?.code === row.code ? 'active' : ''}`}
-                        onClick={() => {
-                          setSelected(row)
-                          setModalOpen(true)
-                        }}
-                      >
-                        <div>
-                          <div className="ticker">{row.code}</div>
-                          <div className="name">{row.name}</div>
-                          <div className="meta">
-                            <span>{row.sector_name || 'UNKNOWN'}</span>
-                            {row.industry_name ? <span className="dot">•</span> : null}
-                            {row.industry_name ? <span>{row.industry_name}</span> : null}
-                          </div>
-                        </div>
-                        <div className="tag">{row.market}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+		          {isMobile && mobileTab === 'discord' ? (
+		            <section className="panel section mobile-discord-panel" aria-label="디스코드 알람받기">
+		              <div className="section-head">
+		                <div>
+		                  <h2>디스코드 알람받기</h2>
+		                  <p>신규 매수 후보가 발생하면 디스코드로 알림합니다.</p>
+		                </div>
+		              </div>
+		              <a
+		                className="discord-btn discord-panel-btn"
+		                href="https://discord.gg/XHE5kKvGU"
+		                target="_blank"
+		                rel="noreferrer"
+		              >
+		                디스코드 알람받기
+		              </a>
+		            </section>
+		          ) : null}
+	
+		        </section>
+		      </main>
 
-              </div>
-            )}
-          </section>
-
-        </section>
-	      </main>
+		      {isMobile ? (
+		        <nav className="mobile-tabbar" aria-label="모바일 탭">
+		          <button
+		            type="button"
+		            className={mobileTab === 'search' ? 'active' : ''}
+		            onClick={() => setMobileTab('search')}
+		          >
+		            종목 검색
+		          </button>
+		          <button
+		            type="button"
+		            className={mobileTab === 'candidates' ? 'active' : ''}
+		            onClick={() => setMobileTab('candidates')}
+		          >
+		            매수 후보
+		          </button>
+		          <button
+		            type="button"
+		            className={mobileTab === 'discord' ? 'active' : ''}
+		            onClick={() => setMobileTab('discord')}
+		          >
+		            디스코드
+		          </button>
+		        </nav>
+		      ) : null}
 
 	      {showCoupangBanner ? (
 	        <div className="ad-modal-overlay" role="dialog" aria-modal="true" aria-label="쿠팡 파트너스 팝업 광고">
@@ -980,7 +1059,7 @@ function App() {
 	                  ))
 	                )}
 	                {!coupangBannerLoading && coupangItems.length === 0 ? (
-	                  <div className="cpb-empty">추천 상품을 불러오지 못했습니다.</div>
+	                  <div className="cpb-empty">{coupangEmptyMessage}</div>
 	                ) : null}
 	              </div>
 

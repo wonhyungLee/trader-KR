@@ -1304,7 +1304,7 @@ def api_coupang_banner():
                 "theme": {
                     "id": "daily-necessities",
                     "title": "생필품 추천",
-                    "tagline": "쿠팡 추천 상품을 불러오려면 서버에 COUPANG 키 설정이 필요합니다.",
+                    "tagline": "서버에 COUPANG_ACCESS_KEY / COUPANG_SECRET_KEY 설정이 필요합니다.",
                     "cta": "바로 보기",
                 },
                 "items": [],
@@ -1327,6 +1327,8 @@ def api_coupang_banner():
         ):
             return jsonify(_coupang_banner_cache["payload"])
 
+    error_code = None
+    error_message = None
     try:
         products = _coupang_fetch_search_products(
             access_key,
@@ -1339,8 +1341,14 @@ def api_coupang_banner():
     except Exception as exc:
         logging.warning("coupang banner fetch failed: %s", exc)
         items = []
+        error_code = "api_error"
+        error_message = str(exc).strip().replace("\n", " ")
+        if len(error_message) > 180:
+            error_message = error_message[:180] + "..."
 
     payload = {
+        "error": error_code,
+        "error_message": error_message,
         "keyword": keyword,
         "theme": {
             "id": "daily-necessities",
