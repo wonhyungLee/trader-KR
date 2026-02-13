@@ -51,15 +51,20 @@ def _parse_kis_daily(res: dict) -> pd.DataFrame:
         return pd.DataFrame()
     recs = []
     for o in outputs:
+        close = float(o.get("stck_clpr") or 0)
+        vol = float(o.get("acml_vol") or 0)
+        amount = float(o.get("acml_tr_pbmn") or 0)
+        if amount <= 0 and close > 0 and vol > 0:
+            amount = close * vol
         recs.append(
             {
                 "date": o.get("stck_bsop_date"),
                 "open": float(o.get("stck_oprc") or 0),
                 "high": float(o.get("stck_hgpr") or 0),
                 "low": float(o.get("stck_lwpr") or 0),
-                "close": float(o.get("stck_clpr") or 0),
-                "volume": float(o.get("acml_vol") or 0),
-                "amount": float(o.get("acml_tr_pbmn") or 0),
+                "close": close,
+                "volume": vol,
+                "amount": amount,
             }
         )
     df = pd.DataFrame(recs)
@@ -72,6 +77,7 @@ def _parse_kis_daily(res: dict) -> pd.DataFrame:
     df = df.sort_values("date")
     df["ma25"] = df["close"].rolling(25, min_periods=5).mean()
     df["disparity"] = df["close"] / df["ma25"] - 1
+    df["disparity"] = df["disparity"].replace([float("inf"), float("-inf")], pd.NA)
     return df[["date", "open", "high", "low", "close", "volume", "amount", "ma25", "disparity"]]
 
 

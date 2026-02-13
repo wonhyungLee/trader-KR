@@ -47,6 +47,25 @@ export_csv:
   mode: "overwrite"
   tables: []
 
+monitor:
+  enabled: true
+  scan_interval_sec: 60
+  rest_batch_size: 30
+  rest_max_retries: 5
+  max_ws_subs: 41
+  ws_subscribe_interval_sec: 0.2
+  subscribe_cooldown_sec: 180
+  alert_cooldown_sec: 600
+  universe_paths:
+    - "data/universe_kospi200.csv"
+    - "data/universe_kosdaq150.csv"
+  state_path: "data/monitor_state.json"
+  ws_tr_id: "H0STCNT0"
+  signal:
+    type: "disparity_threshold"
+    disparity_threshold: -0.08
+    use_intraday: true
+
 # Universe CSV 파일 경로 (KOSPI200 + KOSDAQ150)
 universe:
   groups:

@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 DB_PATH = Path("data/market_data.db")
 FRONTEND_DIST = Path("frontend/dist")
 CLIENT_ERROR_LOG = Path("logs/client_error.log")
-KIS_TOGGLE_PASSWORD = os.getenv("KIS_TOGGLE_PASSWORD", "lee37535**")
+KIS_TOGGLE_PASSWORD = os.getenv("KIS_TOGGLE_PASSWORD", "")  # set via env; empty disables toggle APIs
 FILTER_TOGGLE_PATH = Path("data/selection_filter_toggles.json")
 FILTER_TOGGLE_KEYS = ("min_amount", "liquidity", "disparity")
 _selection_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
@@ -45,8 +45,10 @@ _store.conn.close()
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
@@ -234,6 +236,9 @@ def _selection_notify_loop() -> None:
 
 
 def _verify_toggle_password(payload: Dict[str, Any]) -> bool:
+    # Empty password means toggles are disabled (safer default)
+    if not KIS_TOGGLE_PASSWORD:
+        return False
     pw = str(payload.get("password") or "")
     return pw == KIS_TOGGLE_PASSWORD
 
@@ -250,6 +255,25 @@ def _safe_float(value: Any) -> Optional[float]:
         return num
     except Exception:
         return None
+
+
+def _json_sanitize(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _json_sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    if isinstance(value, (np.integer, np.floating)):
+        value = value.item()
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
 
 
 def _latest_price_map(conn: sqlite3.Connection, codes: list[str]) -> Dict[str, Dict[str, Any]]:
@@ -350,6 +374,7 @@ def _build_account_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
     return {
         "connected": False,
         "connected_at": pd.Timestamp.utcnow().isoformat(),
+        "data_health": data_health,
         "summary": {
             "total_assets": total_assets,
             "cash": cash,
@@ -479,6 +504,15 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
     latest = latest.merge(universe_df, on="code", how="left")
 
     total = len(latest)
+
+    # Basic data health diagnostics (helps explain "0 candidates" cases)
+    data_health = {
+        "latest_rows": int(total),
+        "amount_zero": int((latest["amount"].fillna(0) <= 0).sum()) if "amount" in latest.columns else None,
+        "amount_nan": int(latest["amount"].isna().sum()) if "amount" in latest.columns else None,
+        "ma25_nan": int(latest["ma25"].isna().sum()) if "ma25" in latest.columns else None,
+        "disparity_nan": int(latest["disparity"].isna().sum()) if "disparity" in latest.columns else None,
+    }
     stage_min = latest[latest["amount"] >= min_amount] if min_amount and min_enabled else latest
     stage_liq = stage_min.sort_values("amount", ascending=False)
     if liquidity_rank and liq_enabled:
@@ -601,10 +635,7 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
         "pricing": {"sell_rules": {"take_profit_ret": take_profit_ret}},
     }
     # Ensure JSON-safe values (no NaN/Inf)
-    try:
-        data = json.loads(json.dumps(data, allow_nan=False))
-    except Exception:
-        pass
+    data = _json_sanitize(data)
     _maybe_notify_selection(settings, data)
     _selection_cache.update({"ts": now_ts, "data": data})
     return data
@@ -650,10 +681,40 @@ def serve_static_bnf(path: str):
 
 @app.post("/client_error")
 def client_error():
+    """Client-side error collector (best-effort).
+    Safety: cap payload size and rotate log to avoid disk fill.
+    """
     payload = request.get_json(silent=True) or {}
+    # Hard caps (can override by env)
+    max_payload_bytes = int(os.getenv("CLIENT_ERROR_MAX_BYTES", "100000"))  # 100KB
+    max_log_bytes = int(float(os.getenv("CLIENT_ERROR_LOG_MAX_MB", "10")) * 1024 * 1024)
+
+    # Reject overly large bodies (still return ok to avoid client retry loops)
+    try:
+        raw = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        raw = "{}"
+    if len(raw.encode("utf-8")) > max_payload_bytes:
+        return jsonify({"status": "ignored", "reason": "payload_too_large"})
+
     CLIENT_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if CLIENT_ERROR_LOG.exists() and CLIENT_ERROR_LOG.stat().st_size > max_log_bytes:
+            rotated = CLIENT_ERROR_LOG.with_suffix(CLIENT_ERROR_LOG.suffix + ".1")
+            try:
+                if rotated.exists():
+                    rotated.unlink()
+            except Exception:
+                pass
+            try:
+                CLIENT_ERROR_LOG.rename(rotated)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     with CLIENT_ERROR_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        f.write(raw + "\n")
     return jsonify({"status": "ok"})
 
 

@@ -72,6 +72,7 @@ function App() {
   const [sectors, setSectors] = useState([])
   const [selection, setSelection] = useState({ stages: [], candidates: [], pricing: {} })
   const [status, setStatus] = useState(null)
+  const [isSelectionLoading, setIsSelectionLoading] = useState(false)
 
   const [filter, setFilter] = useState('ALL')
   const [sectorFilter, setSectorFilter] = useState('ALL')
@@ -81,7 +82,7 @@ function App() {
   const [selected, setSelected] = useState(null)
   const [prices, setPrices] = useState([])
   const [pricesLoading, setPricesLoading] = useState(false)
-  const [days, setDays] = useState(240)
+  const [days, setDays] = useState(252)
   const chartWheelRef = useRef(null)
 
   const [filterToggles, setFilterToggles] = useState({ min_amount: true, liquidity: true, disparity: true })
@@ -89,10 +90,14 @@ function App() {
   const [openHelp, setOpenHelp] = useState(null)
   const [zoomRange, setZoomRange] = useState({ start: 0, end: 0 })
   const [zoomArmed, setZoomArmed] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [isStockPanelOpen, setIsStockPanelOpen] = useState(false)
 
   const loadData = useCallback(() => {
     fetchUniverse(sectorFilter !== 'ALL' ? sectorFilter : undefined).then((data) => setUniverse(asArray(data)))
     fetchSectors().then((data) => setSectors(asArray(data)))
+    
+    setIsSelectionLoading(true)
     fetchSelection().then((data) => {
       const payload = data && typeof data === 'object' ? data : {}
       setSelection({
@@ -110,6 +115,7 @@ function App() {
         })
       }
     })
+    .finally(() => setIsSelectionLoading(false))
     fetchSelectionFilters()
       .then((data) => {
         const payload = data && typeof data === 'object' ? data : {}
@@ -142,7 +148,19 @@ function App() {
   useEffect(() => {
     setSelected(null)
     setPrices([])
+    setModalOpen(false)
   }, [filter, sectorFilter])
+
+  useEffect(() => {
+    document.body.style.overflow = modalOpen ? 'hidden' : ''
+    return () => {
+      document.body.style.overflow = ''
+    }
+  }, [modalOpen])
+
+  useEffect(() => {
+    if (!modalOpen) setZoomArmed(false)
+  }, [modalOpen])
 
   const refreshLabel = lastUpdated
     ? lastUpdated.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
@@ -183,7 +201,7 @@ function App() {
   useEffect(() => {
     if (!chartData.length) return
     setZoomRange({ start: 0, end: chartData.length - 1 })
-  }, [chartData.length])
+  }, [chartData.length, modalOpen])
 
   const zoomedData = useMemo(() => {
     if (!chartData.length) return []
@@ -196,6 +214,14 @@ function App() {
     if (!data.length) return []
     return [...data].reverse().slice(0, 30)
   }, [chartData, zoomedData])
+
+  const rangeOptions = [
+    { label: '1Y', value: 252 },
+    { label: '3Y', value: 252 * 3 },
+    { label: '5Y', value: 252 * 5 },
+    { label: '10Y', value: 252 * 10 },
+    { label: 'MAX', value: 5000 }
+  ]
 
   const formatStageValue = (stage) => {
     if (!stage) return '-'
@@ -369,57 +395,19 @@ function App() {
               ))}
             </select>
           </div>
-          <div className="control">
-            <label>Days</label>
-            <input type="number" value={days} onChange={(e) => setDays(Number(e.target.value) || 60)} min={10} max={400} />
-          </div>
           <button className="primary-btn" onClick={() => loadData()}>Refresh</button>
           <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
         </div>
       </header>
 
-      <section className="summary-strip">
-        <div className="summary-card">
-          <span>유니버스</span>
-          <strong>{formatNumber(status?.universe?.total)}</strong>
-          <em>KOSPI200 + KOSDAQ150</em>
-        </div>
-        <div className="summary-card">
-          <span>선별 후보</span>
-          <strong>{formatNumber(candidates.length)}</strong>
-          <em>기준일 {selection?.date || '-'}</em>
-        </div>
-        <div className="summary-card">
-          <span>일봉 최신</span>
-          <strong>{status?.daily_price?.date?.max || '-'}</strong>
-          <em>누적 {formatNumber(status?.daily_price?.rows)}</em>
-        </div>
-        <div className="summary-card">
-          <span>결측 종목</span>
-          <strong>{formatNumber(status?.daily_price?.missing_codes)}</strong>
-          <em>가격 데이터 미보유</em>
-        </div>
-        <div className="summary-card">
-          <span>기대 수익률</span>
-          <strong>{expectedReturnPct === null ? '-' : `${expectedReturnPct.toFixed(2)}%`}</strong>
-          <em>전략 기준</em>
-        </div>
-      </section>
-
-      <nav className="section-nav">
-        <a href="#stocks">주식목록</a>
-        <a href="#filters">선별 과정</a>
-        <a href="#candidates">후보 리스트</a>
-        <a href="#chart">가격 차트</a>
-      </nav>
-
       <main className="layout">
-        <aside id="stocks" className="panel stock-panel">
+        <aside id="stocks" className={`panel stock-panel ${isStockPanelOpen ? 'open' : ''}`}>
           <div className="panel-head">
             <div>
               <h2>주식목록</h2>
               <p>{filtered.length} 종목</p>
             </div>
+            <button className="close-panel-btn" onClick={() => setIsStockPanelOpen(false)}>×</button>
           </div>
           <div className="search">
             <input
@@ -433,7 +421,10 @@ function App() {
               <button
                 key={row.code}
                 className={`list-row ${selected?.code === row.code ? 'active' : ''}`}
-                onClick={() => setSelected(row)}
+                onClick={() => {
+                  setSelected(row)
+                  setModalOpen(true)
+                }}
               >
                 <div>
                   <div className="ticker">{row.code}</div>
@@ -459,128 +450,137 @@ function App() {
               </div>
               <span className="section-meta">기준일 {selection?.date || '-'}</span>
             </div>
-            {filterError ? <div className="error-banner">{filterError}</div> : null}
-            <div className="flow-grid">
-              {stageNodes.map((stage) => (
-                <div key={stage.key} className="flow-card">
-                  <div className="flow-header">
-                    <span>{stage.label}</span>
-                    <strong>{stage.count}</strong>
-                  </div>
-                  <div className="flow-meta">
-                    <span>{stage.criteria}</span>
-                    {stage.key !== 'universe' ? (
-                      <em>통과 {(stage.passRate * 100).toFixed(1)}% · 탈락 {stage.drop}</em>
-                    ) : (
-                      <em>기준 유니버스</em>
-                    )}
-                  </div>
-                  <div className="flow-bar">
-                    <span style={{ width: `${Math.max(6, stage.ratio * 100)}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="filter-columns">
-              {stageColumns.map((stage) => (
-                <div key={stage.key} className={`filter-column ${filterToggles[stage.key] === false ? 'disabled' : ''}`}>
-                  <div className="filter-head">
-                    <div>
-                      <div className="filter-tag">{stage.tag}</div>
-                      <div className="filter-title-row">
-                        <div className="filter-title">{stage.label}</div>
-                        <button
-                          type="button"
-                          className="help-icon"
-                          aria-label={`${stage.label} 설명`}
-                          aria-expanded={openHelp === stage.key}
-                          onClick={() => toggleHelp(stage.key)}
-                        >
-                          ?
-                        </button>
-                        <button
-                          type="button"
-                          className={`filter-toggle ${filterToggles[stage.key] === false ? 'off' : 'on'}`}
-                          onClick={() => handleFilterToggle(stage.key)}
-                        >
-                          {filterToggles[stage.key] === false ? 'OFF' : 'ON'}
-                        </button>
+            {isSelectionLoading ? (
+              <div className="loading-container">
+                <div className="loading-spinner"></div>
+                <p>종목 분석 데이터를 불러오는 중입니다...</p>
+              </div>
+            ) : (
+              <>
+                {filterError ? <div className="error-banner">{filterError}</div> : null}
+                <div className="flow-grid">
+                  {stageNodes.map((stage) => (
+                    <div key={stage.key} className="flow-card">
+                      <div className="flow-header">
+                        <span>{stage.label}</span>
+                        <strong>{stage.count}</strong>
                       </div>
-                      {openHelp === stage.key ? (
-                        <div className="help-bubble">{stageHelp[stage.key]}</div>
-                      ) : null}
-                      <div className="filter-criteria">{stage.criteria}</div>
-                    </div>
-                    <div className="filter-count">{stage.count}</div>
-                  </div>
-                  <div className="filter-sub">
-                    통과 {(stage.passRate * 100).toFixed(1)}% · 탈락 {stage.drop}
-                  </div>
-                  <div className="filter-list">
-                    {stage.items.map((row, idx) => (
-                      <div key={`${stage.key}-${row.code}-${idx}`} className="filter-row">
-                        <div>
-                          <div className="mono">{row.code}</div>
-                          <div className="filter-name">{row.name || '-'}</div>
-                        </div>
-                        <div className="filter-meta">
-                          <span>{formatCurrency(row.amount)}</span>
-                          <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
-                            {formatPct((row.disparity || 0) * 100)}
-                          </span>
-                        </div>
+                      <div className="flow-meta">
+                        <span>{stage.criteria}</span>
+                        {stage.key !== 'universe' ? (
+                          <em>통과 {(stage.passRate * 100).toFixed(1)}% · 탈락 {stage.drop}</em>
+                        ) : (
+                          <em>기준 유니버스</em>
+                        )}
                       </div>
-                    ))}
-                    {stage.items.length === 0 && <div className="empty">통과 종목이 없습니다.</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {finalStage ? (
-              <div className="final-board">
-                <div className="final-head">
-                  <div>
-                    <div className="filter-tag">Final</div>
-                    <div className="filter-title-row">
-                      <div className="final-title">{finalStage.label}</div>
-                      <button
-                        type="button"
-                        className="help-icon"
-                        aria-label="Final 설명"
-                        aria-expanded={openHelp === 'final'}
-                        onClick={() => toggleHelp('final')}
-                      >
-                        ?
-                      </button>
-                    </div>
-                    {openHelp === 'final' ? (
-                      <div className="help-bubble">{stageHelp.final}</div>
-                    ) : null}
-                    <div className="filter-criteria">{finalStage.criteria}</div>
-                  </div>
-                  <div className="filter-count">{finalStage.count}</div>
-                </div>
-                <div className="final-list">
-                  {finalStage.items.map((row, idx) => (
-                    <div key={`final-${row.code}-${idx}`} className="final-row">
-                      <div>
-                        <div className="mono">{row.code}</div>
-                        <div className="filter-name">{row.name || '-'}</div>
-                      </div>
-                      <div className="filter-meta">
-                        <span>{formatCurrency(row.amount)}</span>
-                        <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
-                          {formatPct((row.disparity || 0) * 100)}
-                        </span>
+                      <div className="flow-bar">
+                        <span style={{ width: `${Math.max(6, stage.ratio * 100)}%` }} />
                       </div>
                     </div>
                   ))}
-                  {finalStage.items.length === 0 && <div className="empty">최종 후보가 없습니다.</div>}
                 </div>
-              </div>
-            ) : null}
+
+                <div className="filter-columns">
+                  {stageColumns.map((stage) => (
+                    <div key={stage.key} className={`filter-column ${filterToggles[stage.key] === false ? 'disabled' : ''}`}>
+                      <div className="filter-head">
+                        <div>
+                          <div className="filter-tag">{stage.tag}</div>
+                          <div className="filter-title-row">
+                            <div className="filter-title">{stage.label}</div>
+                            <button
+                              type="button"
+                              className="help-icon"
+                              aria-label={`${stage.label} 설명`}
+                              aria-expanded={openHelp === stage.key}
+                              onClick={() => toggleHelp(stage.key)}
+                            >
+                              ?
+                            </button>
+                            <button
+                              type="button"
+                              className={`filter-toggle ${filterToggles[stage.key] === false ? 'off' : 'on'}`}
+                              onClick={() => handleFilterToggle(stage.key)}
+                            >
+                              {filterToggles[stage.key] === false ? 'OFF' : 'ON'}
+                            </button>
+                          </div>
+                          {openHelp === stage.key ? (
+                            <div className="help-bubble">{stageHelp[stage.key]}</div>
+                          ) : null}
+                          <div className="filter-criteria">{stage.criteria}</div>
+                        </div>
+                        <div className="filter-count">{stage.count}</div>
+                      </div>
+                      <div className="filter-sub">
+                        통과 {(stage.passRate * 100).toFixed(1)}% · 탈락 {stage.drop}
+                      </div>
+                      <div className="filter-list">
+                        {stage.items.map((row, idx) => (
+                          <div key={`${stage.key}-${row.code}-${idx}`} className="filter-row">
+                            <div>
+                              <div className="mono">{row.code}</div>
+                              <div className="filter-name">{row.name || '-'}</div>
+                            </div>
+                            <div className="filter-meta">
+                              <span>{formatCurrency(row.amount)}</span>
+                              <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
+                                {formatPct((row.disparity || 0) * 100)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                        {stage.items.length === 0 && <div className="empty">통과 종목이 없습니다.</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {finalStage ? (
+                  <div className="final-board">
+                    <div className="final-head">
+                      <div>
+                        <div className="filter-tag">Final</div>
+                        <div className="filter-title-row">
+                          <div className="final-title">{finalStage.label}</div>
+                          <button
+                            type="button"
+                            className="help-icon"
+                            aria-label="Final 설명"
+                            aria-expanded={openHelp === 'final'}
+                            onClick={() => toggleHelp('final')}
+                          >
+                            ?
+                          </button>
+                        </div>
+                        {openHelp === 'final' ? (
+                          <div className="help-bubble">{stageHelp.final}</div>
+                        ) : null}
+                        <div className="filter-criteria">{finalStage.criteria}</div>
+                      </div>
+                      <div className="filter-count">{finalStage.count}</div>
+                    </div>
+                    <div className="final-list">
+                      {finalStage.items.map((row, idx) => (
+                        <div key={`final-${row.code}-${idx}`} className="final-row">
+                          <div>
+                            <div className="mono">{row.code}</div>
+                            <div className="filter-name">{row.name || '-'}</div>
+                          </div>
+                          <div className="filter-meta">
+                            <span>{formatCurrency(row.amount)}</span>
+                            <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
+                              {formatPct((row.disparity || 0) * 100)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                      {finalStage.items.length === 0 && <div className="empty">최종 후보가 없습니다.</div>}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
           </section>
 
           <section id="candidates" className="panel section">
@@ -592,24 +592,54 @@ function App() {
               <span className="section-meta">기준일 {selection?.date || '-'}</span>
             </div>
             <div className="tableWrap">
-              <table>
+              <table className="candidate-table">
                 <thead>
                   <tr>
-                    <th>R</th><th>코드</th><th>종목</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>종가</th>
+                    <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th>
                   </tr>
                 </thead>
                 <tbody>
                   {candidates.length === 0 ? (
-                    <tr><td colSpan="7" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
+                    <tr className="empty-row"><td colSpan="6" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
                   ) : candidates.map((r) => (
-                    <tr key={`${r.code}-${r.rank}`} onClick={() => setSelected({ code: r.code, name: r.name, market: r.market })}>
-                      <td>{r.rank}</td>
-                      <td className="mono">{r.code}</td>
-                      <td>{r.name}</td>
-                      <td>{r.market}</td>
-                      <td>{formatPct((Number(r.disparity) || 0) * 100)}</td>
-                      <td>{formatCurrency(r.amount)}</td>
-                      <td>{formatCurrency(r.close)}</td>
+                    <tr
+                      key={`${r.code}-${r.rank}`}
+                      onClick={() => {
+                        setSelected({
+                          code: r.code,
+                          name: r.name,
+                          market: r.market,
+                          sector_name: r.sector_name,
+                          industry_name: r.industry_name
+                        })
+                        setModalOpen(true)
+                      }}
+                    >
+                      <td><span className="rank-badge">{r.rank}</span></td>
+                      <td>
+                        <div className="candidate-name-cell">
+                          <span className="name">{r.name}</span>
+                          <span className="code">{r.code}</span>
+                        </div>
+                      </td>
+                      <td><span className="market-tag">{r.market}</span></td>
+                      <td>
+                        <div className="candidate-metric">
+                          <strong className={(Number(r.disparity) || 0) <= 0 ? 'down' : 'up'}>
+                            {formatPct((Number(r.disparity) || 0) * 100)}
+                          </strong>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="candidate-metric">
+                          <strong>{formatCurrency(r.amount)}</strong>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="candidate-metric">
+                          <strong>{formatCurrency(r.close)}</strong>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -623,26 +653,86 @@ function App() {
                 <h2>가격 차트</h2>
                 <p>{selected ? `${selected.code} · ${selected.name || ''}` : '종목을 선택하세요.'}</p>
               </div>
-              <span className="section-meta">Days {days}</span>
+              <div className="range-tabs">
+                {rangeOptions.map((option) => (
+                  <button
+                    key={option.label}
+                    className={days === option.value ? 'active' : ''}
+                    onClick={() => setDays(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
             {selected ? (
-              <div className="chart-grid">
-                <div className="chart-summary">
-                  <div>
-                    <div className="chart-title">Last Close</div>
-                    <div className="delta-value">{formatCurrency(latest?.close)}</div>
-                    <div className="delta-sub">{latest?.date || '-'}</div>
-                  </div>
-                  <div className="delta">
-                    <div className="chart-title">Change</div>
-                    <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>
-                    <div className="delta-sub">{deltaPct === null ? '-' : formatPct(deltaPct)}</div>
-                  </div>
-                  <button className={`primary-btn ${zoomArmed ? 'active' : ''}`} onClick={() => setZoomArmed(!zoomArmed)}>
-                    {zoomArmed ? 'Zoom ON' : 'Zoom OFF'}
-                  </button>
+              <div className="placeholder">
+                선택한 종목 차트는 팝업으로 표시됩니다.
+                <div style={{ marginTop: 12 }}>
+                  <button className="primary-btn" onClick={() => setModalOpen(true)}>차트 열기</button>
                 </div>
-                <div className="chart-card chart-zoom" ref={chartWheelRef}>
+              </div>
+            ) : (
+              <div className="empty">종목을 선택하면 차트 팝업을 열 수 있습니다.</div>
+            )}
+          </section>
+        </section>
+      </main>
+
+      {selected && modalOpen ? (
+        <div className="modal-overlay" onClick={(e) => {
+          if (e.target === e.currentTarget) setModalOpen(false)
+        }}>
+          <div className="modal-panel">
+            <div className="modal-head">
+              <div>
+                <div className="ticker">{selected.code}</div>
+                <div className="name">{selected.name}</div>
+                <div className="meta">{selected.market} · {selected.sector_name || 'UNKNOWN'}</div>
+              </div>
+              <div className="modal-actions">
+                <div className="range-tabs">
+                  {rangeOptions.map((option) => (
+                    <button
+                      key={option.label}
+                      className={days === option.value ? 'active' : ''}
+                      onClick={() => setDays(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  className={`zoom-toggle ${zoomArmed ? 'on' : ''}`}
+                  onClick={() => setZoomArmed((prev) => !prev)}
+                >
+                  휠 확대 {zoomArmed ? 'ON' : 'OFF'}
+                </button>
+                <button className="modal-close" onClick={() => setModalOpen(false)}>닫기</button>
+              </div>
+            </div>
+
+            <div className="chart-grid">
+              <div className="chart-summary">
+                <div>
+                  <div className="chart-title">Last Close</div>
+                  <div className="delta-value">{formatCurrency(latest?.close)}</div>
+                  <div className="delta-sub">{latest?.date || '-'}</div>
+                </div>
+                <div className="delta">
+                  <div className="chart-title">Change</div>
+                  <div className={`delta-value ${delta >= 0 ? 'up' : 'down'}`}>{formatCurrency(delta)}</div>
+                  <div className="delta-sub">{deltaPct === null ? '-' : formatPct(deltaPct)}</div>
+                </div>
+              </div>
+
+              <div className="chart-card chart-zoom" ref={chartWheelRef}>
+                <div className="chart-title">Price · MA25 · Volume</div>
+                {pricesLoading ? (
+                  <div className="empty">차트 로딩 중...</div>
+                ) : chartData.length === 0 ? (
+                  <div className="empty">가격 데이터가 없습니다.</div>
+                ) : (
                   <ResponsiveContainer width="100%" height={320}>
                     <ComposedChart data={zoomedData} margin={{ left: 8, right: 8, top: 12, bottom: 8 }}>
                       <CartesianGrid stroke="rgba(148,163,184,0.15)" strokeDasharray="3 3" />
@@ -654,45 +744,51 @@ function App() {
                       <Area yAxisId="left" type="monotone" dataKey="close" name="Close" stroke="#f97316" fill="rgba(249,115,22,0.2)" />
                       <Line yAxisId="left" type="monotone" dataKey="ma25" name="MA25" stroke="#38bdf8" dot={false} />
                       <Bar yAxisId="right" dataKey="volume" name="Volume" fill="rgba(56,189,248,0.25)" />
-                      <Brush dataKey="date" height={20} stroke="#94a3b8" onChange={handleBrushChange} />
+                      <Brush
+                        dataKey="date"
+                        height={20}
+                        stroke="#94a3b8"
+                        onChange={handleBrushChange}
+                        data={chartData}
+                      />
                     </ComposedChart>
                   </ResponsiveContainer>
-                </div>
-                <div className="chart-card">
-                  <div className="chart-title">최근 가격</div>
-                  <div className="price-table">
-                    <div className="price-row head">
-                      <span>Date</span>
-                      <span>Open</span>
-                      <span>High</span>
-                      <span>Low</span>
-                      <span>Close</span>
-                      <span>Volume</span>
-                      <span>Amount</span>
-                      <span>Δ</span>
-                    </div>
-                    {pricesLoading && <div className="empty">불러오는 중...</div>}
-                    {!pricesLoading && tableRows.map((row) => (
-                      <div key={row.date} className="price-row">
-                        <span className="mono">{row.date}</span>
-                        <span>{formatCurrency(row.open)}</span>
-                        <span>{formatCurrency(row.high)}</span>
-                        <span>{formatCurrency(row.low)}</span>
-                        <span className="b">{formatCurrency(row.close)}</span>
-                        <span>{formatNumber(row.volume)}</span>
-                        <span>{formatCurrency(row.amount)}</span>
-                        <span>{formatPct((row.disparity || 0) * 100)}</span>
-                      </div>
-                    ))}
+                )}
+              </div>
+
+              <div className="chart-card">
+                <div className="chart-title">최근 가격</div>
+                <div className="price-table">
+                  <div className="price-row head">
+                    <span>Date</span>
+                    <span>Open</span>
+                    <span>High</span>
+                    <span>Low</span>
+                    <span>Close</span>
+                    <span>Volume</span>
+                    <span>Amount</span>
+                    <span>Δ</span>
                   </div>
+                  {pricesLoading && <div className="empty">불러오는 중...</div>}
+                  {!pricesLoading && tableRows.map((row) => (
+                    <div key={row.date} className="price-row">
+                      <span className="mono">{row.date}</span>
+                      <span>{formatCurrency(row.open)}</span>
+                      <span>{formatCurrency(row.high)}</span>
+                      <span>{formatCurrency(row.low)}</span>
+                      <span className="b">{formatCurrency(row.close)}</span>
+                      <span>{formatNumber(row.volume)}</span>
+                      <span>{formatCurrency(row.amount)}</span>
+                      <span>{formatPct((row.disparity || 0) * 100)}</span>
+                    </div>
+                  ))}
+                  {!pricesLoading && tableRows.length === 0 && <div className="empty">가격 데이터가 없습니다.</div>}
                 </div>
               </div>
-            ) : (
-              <div className="empty">종목을 선택하면 차트가 표시됩니다.</div>
-            )}
-          </section>
-        </section>
-      </main>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

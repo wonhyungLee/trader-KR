@@ -214,7 +214,9 @@ class SQLiteStore:
     def __init__(self, db_path: str = "data/market_data.db"):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.db_path = db_path
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        self.conn.execute("PRAGMA busy_timeout=5000;")
+        self.conn.execute("PRAGMA foreign_keys=ON;")
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.row_factory = sqlite3.Row
         self._refill_cols: Optional[set[str]] = None
@@ -446,13 +448,21 @@ class SQLiteStore:
 
     # ---------- daily_price ----------
     def upsert_daily_prices(self, code: str, df: pd.DataFrame):
+        """Insert/replace daily price rows.
+
+        Note: pandas may carry NaN values for indicators. We normalize NaN -> NULL to avoid
+        propagating IEEE NaN into SQLite (which can break comparisons and filters downstream).
+        """
         if df.empty:
             return
         cols = ["date", "code", "open", "high", "low", "close", "volume", "amount", "ma25", "disparity"]
         df = df.copy()
         df["code"] = code
         df = df[cols]
-        records = [tuple(x) for x in df.to_numpy()]
+        # IMPORTANT: cast to object before null-normalization.
+        # Otherwise float columns keep NaN dtype and None turns back into NaN.
+        df = df.astype(object).where(pd.notna(df), None)
+        records = list(df.itertuples(index=False, name=None))
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO daily_price(date, code, open, high, low, close, volume, amount, ma25, disparity)
@@ -466,6 +476,35 @@ class SQLiteStore:
         cur = self.conn.execute("SELECT max(date) FROM daily_price WHERE code=?", (code,))
         row = cur.fetchone()
         return row[0] if row and row[0] else None
+
+    def load_recent_closes(self, code: str, end_date: Optional[str] = None, limit: int = 120) -> pd.DataFrame:
+        """Load recent (date, close) rows for indicator recomputation.
+
+        Args:
+            code: stock code
+            end_date: inclusive end date (YYYY-MM-DD). If None, use latest.
+            limit: maximum number of rows (trading days) to return.
+
+        Returns:
+            DataFrame sorted by date ascending with columns [date, close].
+        """
+        code = normalize_code(code)
+        limit = int(limit) if limit else 120
+        if end_date:
+            cur = self.conn.execute(
+                "SELECT date, close FROM daily_price WHERE code=? AND date<=? ORDER BY date DESC LIMIT ?",
+                (code, end_date, limit),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT date, close FROM daily_price WHERE code=? ORDER BY date DESC LIMIT ?",
+                (code, limit),
+            )
+        rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=["date", "close"])
+        df = pd.DataFrame(rows, columns=[c[0] for c in cur.description])
+        return df.sort_values("date")
 
     def load_prices(self, codes: List[str]) -> pd.DataFrame:
         placeholder = ",".join("?" * len(codes))
