@@ -971,7 +971,7 @@ def prices_realtime():
         try:
             live = price_client.get_current_price(code)
             live = _safe_float(live)
-            if live is not None:
+            if live is not None and live > 0:
                 price = live
                 source = "kis"
         except Exception as exc:

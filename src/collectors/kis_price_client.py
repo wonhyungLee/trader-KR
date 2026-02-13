@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Any, Dict, List, Optional
 
 from src.utils.config import load_settings
 from src.brokers.kis_broker import KISBroker
@@ -28,6 +28,20 @@ class KISPriceClient:
         # 국내주식 기간별 시세(일/주/월/년) TR
         return "FHKST03010100"
 
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            if isinstance(value, str):
+                value = value.replace(",", "").strip()
+            num = float(value)
+            if num != num or num in (float("inf"), float("-inf")):
+                return None
+            return num
+        except Exception:
+            return None
+
     def get_daily_prices(self, code: str, start: str, end: str) -> Dict[str, Any]:
         """start/end: YYYYMMDD"""
         tr_id = self._tr_id()
@@ -51,6 +65,20 @@ class KISPriceClient:
             "FID_INPUT_ISCD": code,
         }
         res = self.broker.request(tr_id, url, params=params)
-        if res and "output" in res:
-            return float(res["output"].get("stck_prpr", 0))
+        if not isinstance(res, dict):
+            return None
+
+        for key in ("output", "output1", "output2"):
+            payload = res.get(key)
+            if payload is None:
+                continue
+            rows = payload if isinstance(payload, list) else [payload]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                for price_key in ("stck_prpr", "stck_pric", "prpr", "price"):
+                    if price_key in row:
+                        price = self._to_float(row.get(price_key))
+                        if price is not None:
+                            return price
         return None
