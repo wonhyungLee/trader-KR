@@ -631,6 +631,9 @@ function App() {
     setZoomRange({ start: range.startIndex, end: range.endIndex })
   }
 
+  const chartHeight = isMobile ? 240 : 320
+  const chartTickFont = isMobile ? 10 : 11
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1082,27 +1085,29 @@ function App() {
                 <div className="name">{selected.name}</div>
                 <div className="meta">{selected.market} · {selected.sector_name || 'UNKNOWN'}</div>
               </div>
-              <div className="modal-actions">
-                <div className="range-tabs">
-                  {rangeOptions.map((option) => (
-                    <button
-                      key={option.label}
-                      className={days === option.value ? 'active' : ''}
-                      onClick={() => setDays(option.value)}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  className={`zoom-toggle ${zoomArmed ? 'on' : ''}`}
-                  onClick={() => setZoomArmed((prev) => !prev)}
-                >
-                  휠 확대 {zoomArmed ? 'ON' : 'OFF'}
-                </button>
-                <button className="modal-close" onClick={() => setModalOpen(false)}>닫기</button>
-              </div>
-            </div>
+		              <div className="modal-actions">
+		                <div className="range-tabs">
+		                  {rangeOptions.map((option) => (
+		                    <button
+		                      key={option.label}
+		                      className={days === option.value ? 'active' : ''}
+		                      onClick={() => setDays(option.value)}
+		                    >
+		                      {option.label}
+		                    </button>
+		                  ))}
+		                </div>
+		                {!isMobile ? (
+		                  <button
+		                    className={`zoom-toggle ${zoomArmed ? 'on' : ''}`}
+		                    onClick={() => setZoomArmed((prev) => !prev)}
+		                  >
+		                    휠 확대 {zoomArmed ? 'ON' : 'OFF'}
+		                  </button>
+		                ) : null}
+		                <button className="modal-close" onClick={() => setModalOpen(false)}>닫기</button>
+		              </div>
+		            </div>
 
             <div className="chart-grid">
               <div className="chart-summary">
@@ -1130,58 +1135,83 @@ function App() {
                 ) : chartData.length === 0 ? (
                   <div className="empty">가격 데이터가 없습니다.</div>
                 ) : (
-                  <ResponsiveContainer width="100%" height={320}>
-                    <ComposedChart data={zoomedData} margin={{ left: 8, right: 8, top: 12, bottom: 8 }}>
-                      <CartesianGrid stroke="rgba(148,163,184,0.15)" strokeDasharray="3 3" />
-                      <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={20} />
-                      <YAxis yAxisId="left" tick={{ fontSize: 11 }} domain={['auto', 'auto']} />
-                      <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} domain={['auto', 'auto']} />
-                      <Tooltip />
-                      <Legend />
-                      <Area yAxisId="left" type="monotone" dataKey="close" name="Close" stroke="#f97316" fill="rgba(249,115,22,0.2)" />
-                      <Line yAxisId="left" type="monotone" dataKey="ma25" name="MA25" stroke="#38bdf8" dot={false} />
-                      <Bar yAxisId="right" dataKey="volume" name="Volume" fill="rgba(56,189,248,0.25)" />
-                      <Brush
-                        dataKey="date"
-                        height={20}
-                        stroke="#94a3b8"
-                        onChange={handleBrushChange}
-                        data={chartData}
-                      />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
+	                  <ResponsiveContainer width="100%" height={chartHeight}>
+	                    <ComposedChart
+	                      data={zoomedData}
+	                      margin={{ left: isMobile ? 0 : 8, right: isMobile ? 0 : 8, top: 12, bottom: 8 }}
+	                    >
+	                      <CartesianGrid stroke="rgba(148,163,184,0.15)" strokeDasharray="3 3" />
+	                      <XAxis dataKey="date" tick={{ fontSize: chartTickFont }} minTickGap={20} />
+	                      <YAxis yAxisId="left" tick={{ fontSize: chartTickFont }} domain={['auto', 'auto']} />
+	                      <YAxis yAxisId="right" orientation="right" tick={{ fontSize: chartTickFont }} domain={['auto', 'auto']} />
+	                      <Tooltip />
+	                      {!isMobile ? <Legend /> : null}
+	                      <Area yAxisId="left" type="monotone" dataKey="close" name="Close" stroke="#f97316" fill="rgba(249,115,22,0.2)" />
+	                      <Line yAxisId="left" type="monotone" dataKey="ma25" name="MA25" stroke="#38bdf8" dot={false} />
+	                      <Bar yAxisId="right" dataKey="volume" name="Volume" fill="rgba(56,189,248,0.25)" />
+	                      {!isMobile ? (
+	                        <Brush
+	                          dataKey="date"
+	                          height={20}
+	                          stroke="#94a3b8"
+	                          onChange={handleBrushChange}
+	                          data={chartData}
+	                        />
+	                      ) : null}
+	                    </ComposedChart>
+	                  </ResponsiveContainer>
+	                )}
+	              </div>
 
-              <div className="chart-card">
-                <div className="chart-title">최근 가격</div>
-                <div className="price-table">
-                  <div className="price-row head">
-                    <span>Date</span>
-                    <span>Open</span>
-                    <span>High</span>
-                    <span>Low</span>
-                    <span>Close</span>
-                    <span>Volume</span>
-                    <span>Amount</span>
-                    <span>Δ</span>
-                  </div>
-                  {pricesLoading && <div className="empty">불러오는 중...</div>}
-                  {!pricesLoading && tableRows.map((row) => (
-                    <div key={row.date} className="price-row">
-                      <span className="mono">{row.date}</span>
-                      <span>{formatCurrency(row.open)}</span>
-                      <span>{formatCurrency(row.high)}</span>
-                      <span>{formatCurrency(row.low)}</span>
-                      <span className="b">{formatCurrency(row.close)}</span>
-                      <span>{formatNumber(row.volume)}</span>
-                      <span>{formatCurrency(row.amount)}</span>
-                      <span>{formatPct((row.disparity || 0) * 100)}</span>
-                    </div>
-                  ))}
-                  {!pricesLoading && tableRows.length === 0 && <div className="empty">가격 데이터가 없습니다.</div>}
-                </div>
-              </div>
+	              <div className="chart-card">
+	                <div className="chart-title">최근 가격</div>
+	                <div className="price-table">
+	                  {isMobile ? (
+	                    <div className="price-row head price-row--mobile">
+	                      <span>Date</span>
+	                      <span>Close</span>
+	                      <span>Amount</span>
+	                      <span>괴리율</span>
+	                    </div>
+	                  ) : (
+	                    <div className="price-row head">
+	                      <span>Date</span>
+	                      <span>Open</span>
+	                      <span>High</span>
+	                      <span>Low</span>
+	                      <span>Close</span>
+	                      <span>Volume</span>
+	                      <span>Amount</span>
+	                      <span>Δ</span>
+	                    </div>
+	                  )}
+	                  {pricesLoading && <div className="empty">불러오는 중...</div>}
+	                  {!pricesLoading && tableRows.map((row) => (
+	                    isMobile ? (
+	                      <div key={row.date} className="price-row price-row--mobile">
+	                        <span className="mono">{row.date}</span>
+	                        <span className="b">{formatCurrency(row.close)}</span>
+	                        <span>{formatCurrency(row.amount)}</span>
+	                        <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
+	                          {formatPct((row.disparity || 0) * 100)}
+	                        </span>
+	                      </div>
+	                    ) : (
+	                      <div key={row.date} className="price-row">
+	                        <span className="mono">{row.date}</span>
+	                        <span>{formatCurrency(row.open)}</span>
+	                        <span>{formatCurrency(row.high)}</span>
+	                        <span>{formatCurrency(row.low)}</span>
+	                        <span className="b">{formatCurrency(row.close)}</span>
+	                        <span>{formatNumber(row.volume)}</span>
+	                        <span>{formatCurrency(row.amount)}</span>
+	                        <span>{formatPct((row.disparity || 0) * 100)}</span>
+	                      </div>
+	                    )
+	                  ))}
+	                  {!pricesLoading && tableRows.length === 0 && <div className="empty">가격 데이터가 없습니다.</div>}
+	                </div>
+	              </div>
             </div>
           </div>
         </div>

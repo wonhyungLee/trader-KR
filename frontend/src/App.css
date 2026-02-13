@@ -736,6 +736,11 @@ body {
   min-width: 720px;
 }
 
+.price-row--mobile {
+  grid-template-columns: 82px minmax(0, 1fr) minmax(0, 1fr) 70px;
+  min-width: 0;
+}
+
 .price-row.head {
   position: sticky;
   top: 0;
@@ -1119,6 +1124,67 @@ body {
 
   .topbar .discord-btn {
     display: none;
+  }
+
+  /* Mobile Chart Popup: use the full screen and keep controls reachable */
+  .modal-overlay {
+    padding: 0;
+    align-items: stretch;
+    justify-content: stretch;
+  }
+
+  .modal-panel {
+    width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+    padding: calc(14px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
+  }
+
+  .modal-head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px 0;
+    margin-bottom: 12px;
+    background: rgba(10, 16, 24, 0.98);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  }
+
+  .modal-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .range-tabs {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .range-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .chart-grid {
+    gap: 12px;
+  }
+
+  .chart-card {
+    padding: 10px;
+  }
+
+  .chart-summary {
+    padding: 10px 12px;
+  }
+
+  .price-table {
+    max-height: 42vh;
   }
 
   .mobile-tabbar {
