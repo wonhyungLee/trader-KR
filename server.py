@@ -16,14 +16,28 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from src.analyzer.backtest_runner import load_strategy
+from src.collectors.kis_price_client import KISPriceClient
 from src.storage.sqlite_store import SQLiteStore
-from src.utils.config import load_settings, list_kis_key_inventory, set_kis_key_enabled
+from src.utils.config import (
+    _load_dotenv,
+    _load_personal_env,
+    load_settings,
+    list_kis_key_inventory,
+    set_kis_key_enabled,
+)
 from src.utils.notifier import maybe_notify
 from src.utils.db_exporter import maybe_export_db
 from src.utils.project_root import ensure_repo_root
 
 # Ensure relative paths resolve from repo root (e.g. data/*, config/*)
 ensure_repo_root(Path(__file__).resolve().parent)
+
+# Load .env/개인정보 early so env-gated endpoints (toggle password, etc.) work under systemd.
+try:
+    _load_dotenv()
+    _load_personal_env()
+except Exception:
+    pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -38,6 +52,9 @@ SELECTION_NOTIFY_PATH = Path("data/selection_notify_state.json")
 SELECTION_NOTIFY_COOLDOWN_SEC = int(os.getenv("SELECTION_NOTIFY_COOLDOWN_SEC", "300"))
 SELECTION_NOTIFY_INTERVAL_SEC = int(os.getenv("SELECTION_NOTIFY_INTERVAL_SEC", "60"))
 DISABLE_TRADING_ENDPOINTS = True
+_kis_price_client: Optional[KISPriceClient] = None
+_kis_price_client_error: Optional[Exception] = None
+_kis_price_client_lock = threading.Lock()
 
 # Create DB and tables if missing
 _store = SQLiteStore(str(DB_PATH))
@@ -276,6 +293,24 @@ def _json_sanitize(value: Any) -> Any:
     return value
 
 
+def _get_kis_price_client(settings: Dict[str, Any]) -> Optional[KISPriceClient]:
+    global _kis_price_client, _kis_price_client_error
+    if _kis_price_client_error:
+        return None
+    if _kis_price_client is not None:
+        return _kis_price_client
+    with _kis_price_client_lock:
+        if _kis_price_client is not None or _kis_price_client_error:
+            return _kis_price_client
+        try:
+            _kis_price_client = KISPriceClient(settings)
+        except Exception as exc:
+            _kis_price_client_error = exc
+            logging.warning("KISPriceClient init failed; live prices disabled: %s", exc)
+            return None
+    return _kis_price_client
+
+
 def _latest_price_map(conn: sqlite3.Connection, codes: list[str]) -> Dict[str, Dict[str, Any]]:
     if not codes:
         return {}
@@ -371,6 +406,7 @@ def _build_account_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
     total_assets = cash + positions_value
     total_pnl = totals.get("pnl")
     total_pnl_pct = totals.get("pnl_pct")
+    data_health = {}
     return {
         "connected": False,
         "connected_at": pd.Timestamp.utcnow().isoformat(),
@@ -453,6 +489,12 @@ def _ensure_latest_table(conn: sqlite3.Connection) -> None:
 
 def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
     now_ts = time.time()
+
+    def _cache_set(payload: Dict[str, Any]) -> Dict[str, Any]:
+        # Compute time can exceed cache TTL; stamp cache at commit time.
+        _selection_cache.update({"ts": time.time(), "data": payload})
+        return payload
+
     cached = _selection_cache.get("data")
     if not force and cached and now_ts - _selection_cache.get("ts", 0) < 30:
         return cached
@@ -477,8 +519,7 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
     codes = universe_df["code"].dropna().astype(str).tolist()
     if not codes:
         data = {"date": None, "stages": [], "candidates": [], "summary": {"total": 0}, "filter_toggles": filter_toggles}
-        _selection_cache.update({"ts": now_ts, "data": data})
-        return data
+        return _cache_set(data)
 
     placeholder = ",".join("?" * len(codes))
     sql = f"""
@@ -494,8 +535,7 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
     df = pd.read_sql_query(sql, conn, params=codes)
     if df.empty:
         data = {"date": None, "stages": [], "candidates": [], "summary": {"total": len(codes)}, "filter_toggles": filter_toggles}
-        _selection_cache.update({"ts": now_ts, "data": data})
-        return data
+        return _cache_set(data)
 
     df = df.sort_values(["code", "date"])
     df["ma25_prev"] = df.groupby("code")["ma25"].shift(1)
@@ -592,12 +632,16 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
 
     candidates = []
     for _, row in final.iterrows():
+        code = row.get("code")
+        # Selection/Final 가격은 일봉 종가(DB) 기준으로만 반환한다.
+        final_p = _safe_float(row.get("close"))
+
         candidates.append({
             "rank": int(row.get("rank") or 0),
-            "code": row.get("code"),
+            "code": code,
             "name": row.get("name"),
             "market": row.get("market"),
-            "close": _safe_float(row.get("close")),
+            "close": final_p,
             "amount": _safe_float(row.get("amount")),
             "disparity": _safe_float(row.get("disparity")),
             "sector_name": row.get("sector_name"),
@@ -637,8 +681,7 @@ def _build_selection_snapshot(conn: sqlite3.Connection, settings: Dict[str, Any]
     # Ensure JSON-safe values (no NaN/Inf)
     data = _json_sanitize(data)
     _maybe_notify_selection(settings, data)
-    _selection_cache.update({"ts": now_ts, "data": data})
-    return data
+    return _cache_set(data)
 
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="")
@@ -802,6 +845,44 @@ def prices():
     return jsonify(df.to_dict(orient="records"))
 
 
+@app.get("/prices/realtime")
+def prices_realtime():
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "missing_code"}), 400
+    code = str(code).strip().zfill(6)
+    settings = load_settings()
+    price = None
+    source = "db"
+    date = None
+
+    price_client = _get_kis_price_client(settings)
+    if price_client is not None:
+        try:
+            live = price_client.get_current_price(code)
+            live = _safe_float(live)
+            if live is not None:
+                price = live
+                source = "kis"
+        except Exception as exc:
+            logging.warning("realtime price fetch failed; fallback to db: %s", exc)
+
+    if price is None:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT close, date FROM daily_price WHERE code=? ORDER BY date DESC LIMIT 1",
+                (code,),
+            ).fetchone()
+            if row:
+                price = _safe_float(row[0])
+                date = row[1]
+        finally:
+            conn.close()
+
+    return jsonify({"code": code, "price": price, "source": source, "date": date})
+
+
 @app.get("/signals")
 def signals():
     if DISABLE_TRADING_ENDPOINTS:
@@ -928,6 +1009,8 @@ def kis_keys_toggle():
     if DISABLE_TRADING_ENDPOINTS:
         return _disabled_response()
     payload = request.get_json(silent=True) or {}
+    if not KIS_TOGGLE_PASSWORD:
+        return jsonify({"error": "toggle_disabled"}), 403
     if not _verify_toggle_password(payload):
         return jsonify({"error": "invalid_password"}), 403
     try:
@@ -957,6 +1040,8 @@ def selection_filters():
 @app.post("/selection_filters/toggle")
 def selection_filters_toggle():
     payload = request.get_json(silent=True) or {}
+    if not KIS_TOGGLE_PASSWORD:
+        return jsonify({"error": "toggle_disabled"}), 403
     if not _verify_toggle_password(payload):
         return jsonify({"error": "invalid_password"}), 403
     key = str(payload.get("key") or "")

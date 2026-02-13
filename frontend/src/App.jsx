@@ -3,9 +3,9 @@ import {
   fetchUniverse,
   fetchSectors,
   fetchPrices,
+  fetchRealtimePrice,
   fetchSelection,
   fetchSelectionFilters,
-  fetchStatus,
   updateSelectionFilterToggle
 } from './api'
 import {
@@ -45,7 +45,7 @@ const formatCurrency = (value) => {
       currency: 'KRW',
       maximumFractionDigits: 0
     }).format(num)
-  } catch (e) {
+  } catch {
     return `₩${formatNumber(num)}`
   }
 }
@@ -57,21 +57,10 @@ const formatPct = (value) => {
   return `${num >= 0 ? '+' : ''}${num.toFixed(2)}%`
 }
 
-const formatTime = (value) => {
-  if (!value) return '-'
-  const ts = typeof value === 'string' ? value : String(value)
-  if (ts.includes('T')) {
-    const part = ts.split('T')[1]
-    return part ? part.split('.')[0] : ts
-  }
-  return ts
-}
-
 function App() {
   const [universe, setUniverse] = useState([])
   const [sectors, setSectors] = useState([])
   const [selection, setSelection] = useState({ stages: [], candidates: [], pricing: {} })
-  const [status, setStatus] = useState(null)
   const [isSelectionLoading, setIsSelectionLoading] = useState(false)
 
   const [filter, setFilter] = useState('ALL')
@@ -83,67 +72,109 @@ function App() {
   const [prices, setPrices] = useState([])
   const [pricesLoading, setPricesLoading] = useState(false)
   const [days, setDays] = useState(252)
+  const [realtimePrice, setRealtimePrice] = useState(null)
   const chartWheelRef = useRef(null)
 
   const [filterToggles, setFilterToggles] = useState({ min_amount: true, liquidity: true, disparity: true })
   const [filterError, setFilterError] = useState('')
+  const [filterTogglePending, setFilterTogglePending] = useState(false)
   const [openHelp, setOpenHelp] = useState(null)
   const [zoomRange, setZoomRange] = useState({ start: 0, end: 0 })
   const [zoomArmed, setZoomArmed] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [isStockPanelOpen, setIsStockPanelOpen] = useState(false)
+  const [updateKey, setUpdateKey] = useState(0)
+  const prevCandidatesRef = useRef([])
 
-  const loadData = useCallback(() => {
-    fetchUniverse(sectorFilter !== 'ALL' ? sectorFilter : undefined).then((data) => setUniverse(asArray(data)))
-    fetchSectors().then((data) => setSectors(asArray(data)))
-    
-    setIsSelectionLoading(true)
-    fetchSelection().then((data) => {
-      const payload = data && typeof data === 'object' ? data : {}
-      setSelection({
-        ...payload,
-        stages: asArray(payload.stages),
-        candidates: asArray(payload.candidates),
-        pricing: payload.pricing && typeof payload.pricing === 'object' ? payload.pricing : {},
-        stage_items: payload.stage_items && typeof payload.stage_items === 'object' ? payload.stage_items : {}
-      })
-      if (payload.filter_toggles && typeof payload.filter_toggles === 'object') {
-        setFilterToggles({
-          min_amount: payload.filter_toggles.min_amount !== false,
-          liquidity: payload.filter_toggles.liquidity !== false,
-          disparity: payload.filter_toggles.disparity !== false
+  const loadData = useCallback(async () => {
+    const sector = sectorFilter !== 'ALL' ? sectorFilter : undefined
+    const isInitial = prevCandidatesRef.current.length === 0
+    if (isInitial) setIsSelectionLoading(true)
+
+    const tasks = []
+
+    tasks.push(
+      fetchUniverse(sector)
+        .then((data) => setUniverse(asArray(data)))
+        .catch(() => setUniverse([]))
+    )
+    tasks.push(
+      fetchSectors()
+        .then((data) => setSectors(asArray(data)))
+        .catch(() => setSectors([]))
+    )
+    tasks.push(
+      fetchSelection()
+        .then((data) => {
+          const payload = data && typeof data === 'object' ? data : {}
+          const newCandidates = asArray(payload.candidates)
+
+          const prevCodes = prevCandidatesRef.current.map((c) => c.code).join(',')
+          const newCodes = newCandidates.map((c) => c.code).join(',')
+          if (prevCodes !== newCodes && !isInitial) setUpdateKey((prev) => prev + 1)
+          prevCandidatesRef.current = newCandidates
+
+          setSelection({
+            ...payload,
+            stages: asArray(payload.stages),
+            candidates: newCandidates,
+            pricing: payload.pricing && typeof payload.pricing === 'object' ? payload.pricing : {},
+            stage_items: payload.stage_items && typeof payload.stage_items === 'object' ? payload.stage_items : {}
+          })
+          if (payload.filter_toggles && typeof payload.filter_toggles === 'object') {
+            setFilterToggles({
+              min_amount: payload.filter_toggles.min_amount !== false,
+              liquidity: payload.filter_toggles.liquidity !== false,
+              disparity: payload.filter_toggles.disparity !== false
+            })
+          }
         })
-      }
-    })
-    .finally(() => setIsSelectionLoading(false))
-    fetchSelectionFilters()
-      .then((data) => {
-        const payload = data && typeof data === 'object' ? data : {}
-        setFilterToggles({
-          min_amount: payload.min_amount !== false,
-          liquidity: payload.liquidity !== false,
-          disparity: payload.disparity !== false
+        .catch(() => {})
+        .finally(() => setIsSelectionLoading(false))
+    )
+    tasks.push(
+      fetchSelectionFilters()
+        .then((data) => {
+          const payload = data && typeof data === 'object' ? data : {}
+          setFilterToggles({
+            min_amount: payload.min_amount !== false,
+            liquidity: payload.liquidity !== false,
+            disparity: payload.disparity !== false
+          })
         })
-      })
-      .catch(() => {})
-    fetchStatus().then((data) => setStatus(data && typeof data === 'object' ? data : null)).catch(() => {})
+        .catch(() => {})
+    )
+
+    await Promise.allSettled(tasks)
     setLastUpdated(new Date())
   }, [sectorFilter])
 
   useEffect(() => {
     loadData()
-    const id = setInterval(() => loadData(), 30000)
-    return () => clearInterval(id)
   }, [loadData])
 
   useEffect(() => {
     if (!selected) return
     setPricesLoading(true)
+    setRealtimePrice(null)
     fetchPrices(selected.code, days)
       .then((data) => setPrices(asArray(data)))
       .catch(() => setPrices([]))
       .finally(() => setPricesLoading(false))
   }, [selected, days])
+
+  // 실시간 가격은 팝업이 열려 있을 때만 1분 주기로 갱신
+  useEffect(() => {
+    if (!selected || !modalOpen) return
+    const poll = () => {
+      fetchRealtimePrice(selected.code).then(data => {
+        if (data && data.price !== null && data.price !== undefined) setRealtimePrice(data.price)
+      }).catch(() => {})
+    }
+    poll()
+    const id = setInterval(poll, 60000)
+    return () => clearInterval(id)
+  }, [selected, modalOpen])
 
   useEffect(() => {
     setSelected(null)
@@ -214,6 +245,13 @@ function App() {
     if (!data.length) return []
     return [...data].reverse().slice(0, 30)
   }, [chartData, zoomedData])
+
+  const livePrice = useMemo(() => {
+    if (realtimePrice !== null && realtimePrice !== undefined) return realtimePrice
+    if (!selected) return null
+    const cand = candidates.find(c => c.code === selected.code)
+    return cand ? cand.close : latest?.close
+  }, [selected, candidates, latest, realtimePrice])
 
   const rangeOptions = [
     { label: '1Y', value: 252 },
@@ -292,22 +330,19 @@ function App() {
     }))
   }, [stageMap, stageNodes, selectionStageItems])
 
-  const finalStage = useMemo(() => {
-    const stage = stageMap.final
-    if (!stage) return null
-    return {
-      ...stage,
-      tag: stageTagMap.final,
-      criteria: formatStageValue(stage),
-      items: asArray(selectionStageItems?.final)
-    }
-  }, [stageMap, selectionStageItems])
-
   const handleFilterToggle = async (key) => {
+    if (filterTogglePending) return
     const password = window.prompt('필터 토글 비밀번호를 입력하세요')
-    if (!password) return
+    if (!password) {
+      setFilterError('토글 비밀번호가 필요합니다.')
+      return
+    }
+    const currentEnabled = filterToggles[key] !== false
+    const nextEnabled = !currentEnabled
+
+    setFilterTogglePending(true)
     try {
-      const updated = await updateSelectionFilterToggle(key, !filterToggles[key], password)
+      const updated = await updateSelectionFilterToggle(key, nextEnabled, password)
       setFilterToggles({
         min_amount: updated.min_amount !== false,
         liquidity: updated.liquidity !== false,
@@ -316,7 +351,16 @@ function App() {
       setFilterError('')
       loadData()
     } catch (e) {
-      setFilterError('비밀번호가 올바르지 않거나 서버 오류가 발생했습니다.')
+      const serverErr = e?.response?.data?.error
+      if (serverErr === 'toggle_disabled') {
+        setFilterError('서버에서 토글 API가 비활성화되어 있습니다. (KIS_TOGGLE_PASSWORD 설정 필요)')
+      } else if (serverErr === 'invalid_password') {
+        setFilterError('비밀번호가 올바르지 않거나 서버에서 토글이 비활성화되어 있습니다. (KIS_TOGGLE_PASSWORD 확인)')
+      } else {
+        setFilterError('서버 오류가 발생했습니다.')
+      }
+    } finally {
+      setFilterTogglePending(false)
     }
   }
 
@@ -366,9 +410,6 @@ function App() {
     if (!range || range.startIndex == null || range.endIndex == null) return
     setZoomRange({ start: range.startIndex, end: range.endIndex })
   }
-
-  const expectedReturn = Number(selection?.pricing?.sell_rules?.take_profit_ret)
-  const expectedReturnPct = Number.isFinite(expectedReturn) ? expectedReturn * 100 : null
 
   return (
     <div className="app-shell">
@@ -450,13 +491,13 @@ function App() {
               </div>
               <span className="section-meta">기준일 {selection?.date || '-'}</span>
             </div>
-            {isSelectionLoading ? (
+            {isSelectionLoading && (!selection || selection.candidates.length === 0) ? (
               <div className="loading-container">
                 <div className="loading-spinner"></div>
                 <p>종목 분석 데이터를 불러오는 중입니다...</p>
               </div>
             ) : (
-              <>
+              <div key={updateKey} className={updateKey > 0 ? "animate-update" : ""}>
                 {filterError ? <div className="error-banner">{filterError}</div> : null}
                 <div className="flow-grid">
                   {stageNodes.map((stage) => (
@@ -501,6 +542,7 @@ function App() {
                               type="button"
                               className={`filter-toggle ${filterToggles[stage.key] === false ? 'off' : 'on'}`}
                               onClick={() => handleFilterToggle(stage.key)}
+                              disabled={filterTogglePending}
                             >
                               {filterToggles[stage.key] === false ? 'OFF' : 'ON'}
                             </button>
@@ -536,146 +578,90 @@ function App() {
                   ))}
                 </div>
 
-                {finalStage ? (
-                  <div className="final-board">
-                    <div className="final-head">
-                      <div>
-                        <div className="filter-tag">Final</div>
-                        <div className="filter-title-row">
-                          <div className="final-title">{finalStage.label}</div>
-                          <button
-                            type="button"
-                            className="help-icon"
-                            aria-label="Final 설명"
-                            aria-expanded={openHelp === 'final'}
-                            onClick={() => toggleHelp('final')}
-                          >
-                            ?
-                          </button>
-                        </div>
-                        {openHelp === 'final' ? (
-                          <div className="help-bubble">{stageHelp.final}</div>
-                        ) : null}
-                        <div className="filter-criteria">{finalStage.criteria}</div>
+                <div className="final-board">
+                  <div className="final-head">
+                    <div>
+                      <div className="filter-tag">Final</div>
+                      <div className="filter-title-row">
+                        <div className="final-title">매수 후보 (Selection)</div>
+                        <button
+                          type="button"
+                          className="help-icon"
+                          aria-label="Final 설명"
+                          aria-expanded={openHelp === 'final'}
+                          onClick={() => toggleHelp('final')}
+                        >
+                          ?
+                        </button>
                       </div>
-                      <div className="filter-count">{finalStage.count}</div>
+                      {openHelp === 'final' ? (
+                        <div className="help-bubble">{stageHelp.final}</div>
+                      ) : null}
+                      <div className="filter-criteria">{formatStageValue(stageMap.final)}</div>
                     </div>
-                    <div className="final-list">
-                      {finalStage.items.map((row, idx) => (
-                        <div key={`final-${row.code}-${idx}`} className="final-row">
-                          <div>
-                            <div className="mono">{row.code}</div>
-                            <div className="filter-name">{row.name || '-'}</div>
-                          </div>
-                          <div className="filter-meta">
-                            <span>{formatCurrency(row.amount)}</span>
-                            <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
-                              {formatPct((row.disparity || 0) * 100)}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                      {finalStage.items.length === 0 && <div className="empty">최종 후보가 없습니다.</div>}
-                    </div>
+                    <div className="filter-count">{Number(stageMap.final?.count || candidates.length || 0)}</div>
                   </div>
-                ) : null}
-              </>
-            )}
-          </section>
 
-          <section id="candidates" className="panel section">
-            <div className="section-head">
-              <div>
-                <h2>매수 후보 (Selection)</h2>
-                <p>선별된 후보 리스트입니다. 클릭하면 차트를 확인할 수 있습니다.</p>
-              </div>
-              <span className="section-meta">기준일 {selection?.date || '-'}</span>
-            </div>
-            <div className="tableWrap">
-              <table className="candidate-table">
-                <thead>
-                  <tr>
-                    <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {candidates.length === 0 ? (
-                    <tr className="empty-row"><td colSpan="6" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
-                  ) : candidates.map((r) => (
-                    <tr
-                      key={`${r.code}-${r.rank}`}
-                      onClick={() => {
-                        setSelected({
-                          code: r.code,
-                          name: r.name,
-                          market: r.market,
-                          sector_name: r.sector_name,
-                          industry_name: r.industry_name
-                        })
-                        setModalOpen(true)
-                      }}
-                    >
-                      <td><span className="rank-badge">{r.rank}</span></td>
-                      <td>
-                        <div className="candidate-name-cell">
-                          <span className="name">{r.name}</span>
-                          <span className="code">{r.code}</span>
-                        </div>
-                      </td>
-                      <td><span className="market-tag">{r.market}</span></td>
-                      <td>
-                        <div className="candidate-metric">
-                          <strong className={(Number(r.disparity) || 0) <= 0 ? 'down' : 'up'}>
-                            {formatPct((Number(r.disparity) || 0) * 100)}
-                          </strong>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="candidate-metric">
-                          <strong>{formatCurrency(r.amount)}</strong>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="candidate-metric">
-                          <strong>{formatCurrency(r.close)}</strong>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section id="chart" className="panel section">
-            <div className="section-head">
-              <div>
-                <h2>가격 차트</h2>
-                <p>{selected ? `${selected.code} · ${selected.name || ''}` : '종목을 선택하세요.'}</p>
-              </div>
-              <div className="range-tabs">
-                {rangeOptions.map((option) => (
-                  <button
-                    key={option.label}
-                    className={days === option.value ? 'active' : ''}
-                    onClick={() => setDays(option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {selected ? (
-              <div className="placeholder">
-                선택한 종목 차트는 팝업으로 표시됩니다.
-                <div style={{ marginTop: 12 }}>
-                  <button className="primary-btn" onClick={() => setModalOpen(true)}>차트 열기</button>
+                  <div key={`cand-${updateKey}`} className={`tableWrap ${updateKey > 0 ? 'animate-update' : ''}`}>
+                    <table className="candidate-table">
+                      <thead>
+                        <tr>
+                          <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {candidates.length === 0 ? (
+                          <tr className="empty-row"><td colSpan="6" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
+                        ) : candidates.map((r) => (
+                          <tr
+                            key={`${r.code}-${r.rank}`}
+                            onClick={() => {
+                              setSelected({
+                                code: r.code,
+                                name: r.name,
+                                market: r.market,
+                                sector_name: r.sector_name,
+                                industry_name: r.industry_name
+                              })
+                              setModalOpen(true)
+                            }}
+                          >
+                            <td><span className="rank-badge">{r.rank}</span></td>
+                            <td>
+                              <div className="candidate-name-cell">
+                                <span className="name">{r.name}</span>
+                                <span className="code">{r.code}</span>
+                              </div>
+                            </td>
+                            <td><span className="market-tag">{r.market}</span></td>
+                            <td>
+                              <div className="candidate-metric">
+                                <strong className={(Number(r.disparity) || 0) <= 0 ? 'down' : 'up'}>
+                                  {formatPct((Number(r.disparity) || 0) * 100)}
+                                </strong>
+                              </div>
+                            </td>
+                            <td>
+                              <div className="candidate-metric">
+                                <strong>{formatCurrency(r.amount)}</strong>
+                              </div>
+                            </td>
+                            <td>
+                              <div className="candidate-metric">
+                                <strong>{formatCurrency(r.close)}</strong>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
+
               </div>
-            ) : (
-              <div className="empty">종목을 선택하면 차트 팝업을 열 수 있습니다.</div>
             )}
           </section>
+
         </section>
       </main>
 
@@ -716,7 +702,12 @@ function App() {
               <div className="chart-summary">
                 <div>
                   <div className="chart-title">Last Close</div>
-                  <div className="delta-value">{formatCurrency(latest?.close)}</div>
+                  <div className="delta-value" style={{ opacity: 0.8, fontSize: '16px' }}>{formatCurrency(prev?.close)}</div>
+                  <div className="delta-sub">{prev?.date || '-'}</div>
+                </div>
+                <div>
+                  <div className="chart-title" style={{ color: 'var(--accent-2)' }}>Current Price</div>
+                  <div className="delta-value">{formatCurrency(livePrice)}</div>
                   <div className="delta-sub">{latest?.date || '-'}</div>
                 </div>
                 <div className="delta">

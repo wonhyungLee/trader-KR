@@ -41,3 +41,16 @@ class KISPriceClient:
             "FID_ORG_ADJ_PRC": "1",
         }
         return self.broker.request(tr_id, url, params=params)
+
+    def get_current_price(self, code: str) -> Optional[float]:
+        """주식현재가 시세 조회 (TR: FHKST01010100)"""
+        tr_id = "FHKST01010100"
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code,
+        }
+        res = self.broker.request(tr_id, url, params=params)
+        if res and "output" in res:
+            return float(res["output"].get("stck_prpr", 0))
+        return None
