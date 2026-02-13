@@ -364,6 +364,20 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _selection_sector_of(row: pd.Series) -> str:
+    for key in ("industry_name", "sector_name"):
+        value = row.get(key)
+        try:
+            if value is None or pd.isna(value):
+                continue
+        except Exception:
+            pass
+        value = str(value).strip()
+        if value:
+            return value
+    return "UNKNOWN"
+
+
 def _json_sanitize(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _json_sanitize(v) for k, v in value.items()}
@@ -638,6 +652,11 @@ def _build_selection_snapshot(
     df["ret3"] = df.groupby("code")["close"].pct_change(3)
     latest = df.groupby("code").tail(1).copy()
     latest = latest.merge(universe_df, on="code", how="left")
+    try:
+        sector_df = pd.read_sql_query("SELECT code, sector_name, industry_name FROM sector_map", conn)
+        latest = latest.merge(sector_df, on="code", how="left")
+    except Exception:
+        pass
 
     total = len(latest)
 
@@ -691,7 +710,7 @@ def _build_selection_snapshot(
     final_rows = []
     sector_counts: Dict[str, int] = {}
     for _, row in stage_ranked.iterrows():
-        sec = row.get("group_name") or "UNKNOWN"
+        sec = _selection_sector_of(row)
         if max_per_sector and max_per_sector > 0 and sector_counts.get(sec, 0) >= max_per_sector:
             continue
         final_rows.append(row)
@@ -701,12 +720,6 @@ def _build_selection_snapshot(
     final = pd.DataFrame(final_rows) if final_rows else stage_ranked.head(0).copy()
     if not final.empty:
         final["rank"] = range(1, len(final) + 1)
-
-    try:
-        sector_df = pd.read_sql_query("SELECT code, sector_name, industry_name FROM sector_map", conn)
-        final = final.merge(sector_df, on="code", how="left")
-    except Exception:
-        pass
 
     def _pack(df: pd.DataFrame, sort_by: str | None = None, ascending: bool = False) -> list[Dict[str, Any]]:
         if df is None or df.empty:
@@ -1192,6 +1205,11 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
     df["ret3"] = df.groupby("code")["close"].pct_change(3)
     latest = df.groupby("code").tail(1).copy()
     latest = latest.merge(universe_df, on="code", how="left")
+    try:
+        sector_df = pd.read_sql_query("SELECT code, sector_name, industry_name FROM sector_map", conn)
+        latest = latest.merge(sector_df, on="code", how="left")
+    except Exception:
+        pass
 
     total = len(latest)
 
@@ -1241,7 +1259,7 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
     final_rows = []
     sector_counts: Dict[str, int] = {}
     for _, row in ranked.iterrows():
-        sec = row.get("group_name") or "UNKNOWN"
+        sec = _selection_sector_of(row)
         if max_per_sector and sector_counts.get(sec, 0) >= max_per_sector:
             continue
         final_rows.append(row)
@@ -1252,12 +1270,6 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
     final = pd.DataFrame(final_rows) if final_rows else ranked.head(0).copy()
     if not final.empty:
         final["rank"] = range(1, len(final) + 1)
-
-    try:
-        sector_df = pd.read_sql_query("SELECT code, sector_name, industry_name FROM sector_map", conn)
-        final = final.merge(sector_df, on="code", how="left")
-    except Exception:
-        pass
 
     latest_date = latest["date"].max()
     cols = ["code", "name", "market", "amount", "close", "disparity", "rank", "sector_name", "industry_name"]
