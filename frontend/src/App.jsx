@@ -80,6 +80,7 @@ function App() {
   const [realtimePrice, setRealtimePrice] = useState(null)
   const [candidateLivePrices, setCandidateLivePrices] = useState({})
   const chartWheelRef = useRef(null)
+  const chartPinchRef = useRef(null)
 
   const [filterToggles, setFilterToggles] = useState({ min_amount: true, liquidity: true, disparity: true })
   const [filterError, setFilterError] = useState('')
@@ -616,15 +617,137 @@ function App() {
     setZoomRange({ start: newStart, end: newEnd })
   }
 
+  const applyZoomSpan = useCallback((nextSpan, ratio, baseRange, baseSpan) => {
+    if (!chartData.length) return
+    const minSpan = 20
+    const maxSpan = chartData.length
+
+    const anchorRatio = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0.5
+    const span0 = Math.max(1, Number(baseSpan || 0) || 1)
+    const range0 = baseRange && typeof baseRange === 'object' ? baseRange : zoomRange
+
+    let span = Math.round(Number(nextSpan || 0) || 1)
+    span = Math.min(maxSpan, Math.max(minSpan, span))
+
+    const anchor = Number(range0.start || 0) + Math.round(span0 * anchorRatio)
+    let newStart = Math.round(anchor - span * anchorRatio)
+    let newEnd = newStart + span - 1
+    if (newStart < 0) {
+      newStart = 0
+      newEnd = span - 1
+    }
+    if (newEnd > maxSpan - 1) {
+      newEnd = maxSpan - 1
+      newStart = Math.max(0, newEnd - span + 1)
+    }
+    setZoomRange({ start: newStart, end: newEnd })
+  }, [chartData.length, setZoomRange, zoomRange])
+
+  const handleChartPinchStart = useCallback((event) => {
+    if (!chartData.length) return
+    if (!zoomArmed) return
+    if (!event.touches || event.touches.length !== 2) return
+    event.preventDefault()
+    event.stopPropagation()
+
+    const t1 = event.touches[0]
+    const t2 = event.touches[1]
+    const dx = t2.clientX - t1.clientX
+    const dy = t2.clientY - t1.clientY
+    const dist = Math.hypot(dx, dy) || 1
+
+    const rect = event.currentTarget.getBoundingClientRect()
+    const centerX = (t1.clientX + t2.clientX) / 2
+    const ratio = rect.width ? (centerX - rect.left) / rect.width : 0.5
+
+    const span = Math.max(1, zoomRange.end - zoomRange.start + 1)
+    chartPinchRef.current = {
+      startDist: dist,
+      startSpan: span,
+      startRange: { ...zoomRange },
+      ratio: Math.min(1, Math.max(0, ratio))
+    }
+  }, [chartData.length, zoomArmed, zoomRange])
+
+  const handleChartPinchMove = useCallback((event) => {
+    const st = chartPinchRef.current
+    if (!st) return
+    if (!zoomArmed) return
+    if (!event.touches || event.touches.length !== 2) return
+    event.preventDefault()
+    event.stopPropagation()
+
+    const t1 = event.touches[0]
+    const t2 = event.touches[1]
+    const dx = t2.clientX - t1.clientX
+    const dy = t2.clientY - t1.clientY
+    const dist = Math.hypot(dx, dy) || 1
+    const scale = dist / (st.startDist || 1)
+    if (!Number.isFinite(scale) || scale <= 0) return
+
+    // scale > 1 => fingers apart => zoom in => smaller span
+    const nextSpan = Math.round((st.startSpan || 1) / scale)
+    applyZoomSpan(nextSpan, st.ratio, st.startRange, st.startSpan)
+  }, [applyZoomSpan, zoomArmed])
+
+  const handleChartPinchEnd = useCallback((event) => {
+    if (!chartPinchRef.current) return
+    const touches = event.touches
+    if (!touches || touches.length < 2) {
+      chartPinchRef.current = null
+    }
+  }, [])
+
   const handleChartWheelCallback = useCallback(handleChartWheel, [chartData, zoomRange, zoomArmed])
 
   useEffect(() => {
     const el = chartWheelRef.current
     if (!el) return
     const onWheel = (event) => handleChartWheelCallback(event)
+    const onTouchStart = (event) => handleChartPinchStart(event)
+    const onTouchMove = (event) => handleChartPinchMove(event)
+    const onTouchEnd = (event) => handleChartPinchEnd(event)
+    const onGesture = (event) => {
+      if (!zoomArmed) return
+      event.preventDefault()
+    }
+
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
-  }, [handleChartWheelCallback])
+    el.addEventListener('touchstart', onTouchStart, { passive: false })
+    el.addEventListener('touchmove', onTouchMove, { passive: false })
+    el.addEventListener('touchend', onTouchEnd, { passive: false })
+    el.addEventListener('touchcancel', onTouchEnd, { passive: false })
+    // iOS Safari: block viewport pinch zoom while chart-zoom mode is armed.
+    el.addEventListener('gesturestart', onGesture, { passive: false })
+    el.addEventListener('gesturechange', onGesture, { passive: false })
+    el.addEventListener('gestureend', onGesture, { passive: false })
+
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+      el.removeEventListener('gesturestart', onGesture)
+      el.removeEventListener('gesturechange', onGesture)
+      el.removeEventListener('gestureend', onGesture)
+    }
+  }, [handleChartWheelCallback, handleChartPinchEnd, handleChartPinchMove, handleChartPinchStart, zoomArmed])
+
+  // iOS Safari sometimes performs viewport pinch-zoom even when element handlers exist.
+  // While zoom mode is armed inside the modal, suppress gesture events globally.
+  useEffect(() => {
+    if (!modalOpen || !zoomArmed) return
+    const prevent = (event) => event.preventDefault()
+    document.addEventListener('gesturestart', prevent, { passive: false })
+    document.addEventListener('gesturechange', prevent, { passive: false })
+    document.addEventListener('gestureend', prevent, { passive: false })
+    return () => {
+      document.removeEventListener('gesturestart', prevent)
+      document.removeEventListener('gesturechange', prevent)
+      document.removeEventListener('gestureend', prevent)
+    }
+  }, [modalOpen, zoomArmed])
 
   const handleBrushChange = (range) => {
     if (!range || range.startIndex == null || range.endIndex == null) return
@@ -1097,14 +1220,12 @@ function App() {
 		                    </button>
 		                  ))}
 		                </div>
-		                {!isMobile ? (
-		                  <button
-		                    className={`zoom-toggle ${zoomArmed ? 'on' : ''}`}
-		                    onClick={() => setZoomArmed((prev) => !prev)}
-		                  >
-		                    휠 확대 {zoomArmed ? 'ON' : 'OFF'}
-		                  </button>
-		                ) : null}
+		                <button
+		                  className={`zoom-toggle ${zoomArmed ? 'on' : ''}`}
+		                  onClick={() => setZoomArmed((prev) => !prev)}
+		                >
+		                  {isMobile ? '핀치 확대' : '휠 확대'} {zoomArmed ? 'ON' : 'OFF'}
+		                </button>
 		                <button className="modal-close" onClick={() => setModalOpen(false)}>닫기</button>
 		              </div>
 		            </div>
@@ -1148,7 +1269,7 @@ function App() {
                 </div>
               )}
 
-              <div className="chart-card chart-zoom" ref={chartWheelRef}>
+              <div className={`chart-card chart-zoom ${zoomArmed ? 'armed' : ''}`} ref={chartWheelRef}>
                 <div className="chart-title">Price · MA25 · Volume</div>
                 {pricesLoading ? (
                   <div className="empty">차트 로딩 중...</div>

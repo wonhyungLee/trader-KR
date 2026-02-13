@@ -27,6 +27,7 @@ from src.storage.sqlite_store import SQLiteStore
 from src.utils.config import (
     _load_dotenv,
     _load_personal_env,
+    _load_coupang_env_from_api_info_file,
     load_settings,
     list_kis_key_inventory,
     set_kis_key_enabled,
@@ -42,6 +43,7 @@ ensure_repo_root(Path(__file__).resolve().parent)
 try:
     _load_dotenv()
     _load_personal_env()
+    _load_coupang_env_from_api_info_file()
 except Exception:
     pass
 
@@ -549,86 +551,6 @@ _COUPANG_BANNER_KEYWORDS = [
 ]
 
 _COUPANG_BANNER_CTA_VARIANTS = ["최저가 보기", "배송 일정 확인", "리뷰 보고 선택"]
-_COUPANG_API_INFO_FILENAMES = (
-    "쿠팡파트너스api정보.txt",
-    "쿠팡파트너스 api정보.txt",
-    "쿠팡파트너스api.txt",
-)
-
-
-def _load_coupang_env_from_api_info_file() -> None:
-    """Best-effort loader for Coupang Partners keys from a local text file.
-
-    User stores credentials outside the repo (e.g. ~/쿠팡파트너스api정보.txt). We only fill missing
-    env vars and never expose secrets to the frontend.
-    """
-    if str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip() and str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip():
-        return
-
-    candidates: list[Path] = []
-    override = str(os.getenv("COUPANG_API_INFO_PATH", "") or "").strip()
-    if override:
-        candidates.append(Path(override))
-
-    cwd = Path.cwd()
-    home = Path.home()
-    for name in _COUPANG_API_INFO_FILENAMES:
-        candidates.append(cwd / name)
-        candidates.append(cwd.parent / name)
-        candidates.append(home / name)
-
-    def _next_nonempty(lines: list[str], idx: int) -> str:
-        for j in range(idx + 1, len(lines)):
-            v = str(lines[j] or "").strip()
-            if v:
-                return v
-        return ""
-
-    for path in candidates:
-        try:
-            if not path.exists() or not path.is_file():
-                continue
-        except Exception:
-            continue
-        try:
-            raw = path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-
-        head_lines = [line.strip() for line in (raw.splitlines()[:120] if raw else [])]
-        access_key = ""
-        secret_key = ""
-        partner_id = ""
-
-        for idx, line in enumerate(head_lines):
-            key = str(line or "").strip().lower()
-            if key in ("access key", "access-key", "accesskey", "access_key"):
-                access_key = _next_nonempty(head_lines, idx)
-            elif key in ("secret key", "secret-key", "secretkey", "secret_key"):
-                secret_key = _next_nonempty(head_lines, idx)
-            elif key in ("id", "partner id", "partner_id"):
-                partner_id = _next_nonempty(head_lines, idx)
-
-        # Also accept KEY=VALUE style lines in the header region.
-        for line in head_lines:
-            if not line or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = str(k or "").strip().upper()
-            v = str(v or "").strip().strip('"').strip("'")
-            if k in ("COUPANG_ACCESS_KEY", "ACCESS_KEY"):
-                access_key = access_key or v
-            elif k in ("COUPANG_SECRET_KEY", "SECRET_KEY"):
-                secret_key = secret_key or v
-            elif k in ("COUPANG_PARTNER_ID", "PARTNER_ID"):
-                partner_id = partner_id or v
-
-        if access_key and secret_key:
-            os.environ.setdefault("COUPANG_ACCESS_KEY", access_key)
-            os.environ.setdefault("COUPANG_SECRET_KEY", secret_key)
-            if partner_id:
-                os.environ.setdefault("COUPANG_PARTNER_ID", partner_id)
-            return
 
 
 def _encode_coupang_component(value: Any) -> str:
@@ -1367,7 +1289,6 @@ def api_coupang_banner():
         limit = 3
     limit = max(1, min(10, limit))
 
-    _load_coupang_env_from_api_info_file()
     access_key = str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip()
     secret_key = str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip()
     sub_id = str(os.getenv("COUPANG_SUB_ID", "") or "").strip() or "cp-banner"

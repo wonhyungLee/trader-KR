@@ -2,6 +2,7 @@ import os
 import re
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -11,6 +12,11 @@ _env_pattern = re.compile(r"\${([^}]+)}")
 _kis_key_pattern = re.compile(r"^KIS(\d+)_(KEY|SECRET|ACCOUNT_NUMBER|ACCOUNT_CODE)\s*=\s*(.*)$")
 _kis_desc_keywords = ("계좌", "한투", "ISA", "연금")
 _kis_toggle_path = os.path.join("data", "kis_key_toggles.json")
+_coupang_api_info_filenames = (
+    "쿠팡파트너스api정보.txt",
+    "쿠팡파트너스 api정보.txt",
+    "쿠팡파트너스api.txt",
+)
 
 
 def _mask_account_no(value: Optional[str]) -> Optional[str]:
@@ -227,6 +233,88 @@ def _load_personal_env(path: str = "개인정보") -> None:
                 break
 
 
+def _load_coupang_env_from_api_info_file() -> None:
+    """Load COUPANG keys from a local txt file into env (best-effort).
+
+    This keeps secrets out of git while still allowing a simple "drop the txt file" workflow.
+    Only fills missing env vars; never overwrites already-exported values.
+    """
+    if str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip() and str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip():
+        return
+
+    candidates: list[Path] = []
+    override = str(os.getenv("COUPANG_API_INFO_PATH", "") or "").strip()
+    if override:
+        candidates.append(Path(override))
+
+    cwd = Path.cwd()
+    home = Path.home()
+    for name in _coupang_api_info_filenames:
+        candidates.append(cwd / name)
+        candidates.append(cwd.parent / name)
+        candidates.append(home / name)
+        candidates.append(Path("/home/ubuntu") / name)
+
+    def _next_nonempty(lines: list[str], idx: int) -> str:
+        for j in range(idx + 1, len(lines)):
+            v = str(lines[j] or "").strip()
+            if v:
+                return v
+        return ""
+
+    for path in candidates:
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+        except Exception:
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        head_lines = [line.strip() for line in (raw.splitlines()[:120] if raw else [])]
+        access_key = ""
+        secret_key = ""
+        partner_id = ""
+
+        for idx, line in enumerate(head_lines):
+            key = str(line or "").strip().lower().rstrip(":")
+            if key in ("access key", "access-key", "accesskey", "access_key"):
+                access_key = _next_nonempty(head_lines, idx)
+            elif key in ("secret key", "secret-key", "secretkey", "secret_key"):
+                secret_key = _next_nonempty(head_lines, idx)
+            elif key in ("id", "partner id", "partner_id"):
+                partner_id = _next_nonempty(head_lines, idx)
+
+            # Single-line formats: "Access key: xxx"
+            if not access_key and key.startswith("access key") and ":" in line:
+                access_key = line.split(":", 1)[1].strip()
+            if not secret_key and key.startswith("secret key") and ":" in line:
+                secret_key = line.split(":", 1)[1].strip()
+
+        # Also accept KEY=VALUE style lines in the header region.
+        for line in head_lines:
+            if not line or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = str(k or "").strip().upper()
+            v = str(v or "").strip().strip('"').strip("'")
+            if k in ("COUPANG_ACCESS_KEY", "ACCESS_KEY"):
+                access_key = access_key or v
+            elif k in ("COUPANG_SECRET_KEY", "SECRET_KEY"):
+                secret_key = secret_key or v
+            elif k in ("COUPANG_PARTNER_ID", "PARTNER_ID"):
+                partner_id = partner_id or v
+
+        if access_key and secret_key:
+            os.environ.setdefault("COUPANG_ACCESS_KEY", access_key)
+            os.environ.setdefault("COUPANG_SECRET_KEY", secret_key)
+            if partner_id:
+                os.environ.setdefault("COUPANG_PARTNER_ID", partner_id)
+            return
+
+
 def _sub_env(value: str) -> str:
     """Replace ${VAR} with environment variable if present."""
     def repl(match: re.Match[str]) -> str:
@@ -263,6 +351,7 @@ def load_yaml(path: str) -> Dict[str, Any]:
     # Populate os.environ from .env and 개인정보 before substitution
     _load_dotenv()
     _load_personal_env()
+    _load_coupang_env_from_api_info_file()
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
     # env substitution for string values

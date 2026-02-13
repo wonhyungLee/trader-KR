@@ -755,6 +755,11 @@ body {
   overscroll-behavior: contain;
 }
 
+.chart-zoom.armed {
+  /* Disable browser pinch-zoom so we can interpret pinch as chart range zoom. */
+  touch-action: none;
+}
+
 .chart-title {
   font-size: 12px;
   color: var(--muted);
