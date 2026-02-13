@@ -600,7 +600,8 @@ def _build_selection_snapshot(
     buy_kospi = float(getattr(params, "buy_kospi", 0) or 0)
     buy_kosdaq = float(getattr(params, "buy_kosdaq", 0) or 0)
     max_positions = int(getattr(params, "max_positions", 10) or 10)
-    max_per_sector = int(getattr(params, "max_per_sector", 0) or 0)
+    # 추천 항목에서는 동일 섹터에서 상위 종목 1개만 허용한다.
+    max_per_sector = 1
     rank_mode = str(getattr(params, "rank_mode", "amount") or "amount").lower()
     entry_mode = str(getattr(params, "entry_mode", "mean_reversion") or "mean_reversion").lower()
     take_profit_ret = float(getattr(params, "take_profit_ret", 0) or 0)
@@ -1160,7 +1161,8 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
     buy_kospi = float(getattr(params, "buy_kospi", 0) or 0)
     buy_kosdaq = float(getattr(params, "buy_kosdaq", 0) or 0)
     max_positions = int(getattr(params, "max_positions", 10) or 10)
-    max_per_sector = int(getattr(params, "max_per_sector", 0) or 0)
+    # 추천 항목에서는 동일 섹터에서 상위 종목 1개만 허용한다.
+    max_per_sector = 1
     rank_mode = str(getattr(params, "rank_mode", "amount") or "amount").lower()
     entry_mode = str(getattr(params, "entry_mode", "mean_reversion") or "mean_reversion").lower()
     trend_filter = bool(getattr(params, "trend_ma25_rising", False))
