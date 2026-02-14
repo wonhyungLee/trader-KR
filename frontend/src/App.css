@@ -1228,6 +1228,7 @@ body {
     padding: 12px;
     display: flex;
     flex-direction: column;
+    gap: 12px;
   }
 
   .mchart-chart {
@@ -1235,11 +1236,80 @@ body {
     min-height: 0;
     display: flex;
     flex-direction: column;
+    padding: 0; /* full-bleed chart inside the card */
+    overflow: hidden;
+  }
+
+  .mchart-chart .chart-title {
+    margin: 0;
+    padding: 12px 12px 0;
+  }
+
+  .mchart-chart-body {
+    padding: 0 6px 10px;
   }
 
   .mchart-chart-body {
     flex: 1;
     min-height: 0;
+  }
+
+  .mchart-table {
+    flex: 0 0 auto;
+    height: clamp(160px, 28vh, 260px);
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mchart-table .chart-title {
+    margin: 0;
+    padding: 12px 12px 10px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  }
+
+  .mchart-table-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 10px 10px 12px;
+    display: grid;
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .mchart-row {
+    display: grid;
+    grid-template-columns: 82px minmax(0, 1fr) minmax(0, 1fr) 70px;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(15, 23, 42, 0.7);
+    min-width: 0;
+  }
+
+  .mchart-row--head {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    color: var(--muted);
+    background: rgba(15, 23, 42, 0.9);
+    border-color: rgba(148, 163, 184, 0.35);
+  }
+
+  .mchart-row .b {
+    font-weight: 900;
+    color: var(--text);
+  }
+
+  .mchart-table-empty {
+    color: var(--muted);
+    text-align: center;
+    padding: 12px 0;
   }
 
   .mchart-chart-empty {

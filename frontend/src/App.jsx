@@ -1281,50 +1281,78 @@ function App() {
                       </button>
                     ))}
                   </div>
-                </div>
+	                </div>
+	
+	                <div className="mchart-body">
+	                  <div className={`chart-card mchart-chart chart-zoom ${zoomArmed ? 'armed' : ''}`} ref={chartWheelRef}>
+	                    <div className="chart-title">Price · MA25 · Volume</div>
+	                    <div className="mchart-chart-body">
+	                      {pricesLoading ? (
+	                        <div className="mchart-chart-empty">차트 로딩 중...</div>
+	                      ) : chartData.length === 0 ? (
+	                        <div className="mchart-chart-empty">가격 데이터가 없습니다.</div>
+	                      ) : (
+	                        <ResponsiveContainer width="100%" height="100%">
+	                          <ComposedChart
+	                            data={zoomedData}
+	                            margin={{ left: 0, right: 0, top: 12, bottom: 8 }}
+	                          >
+	                            <CartesianGrid stroke="rgba(148,163,184,0.15)" strokeDasharray="3 3" />
+	                            <XAxis dataKey="date" tick={{ fontSize: chartTickFont }} minTickGap={20} />
+	                            <YAxis yAxisId="left" width={44} tick={{ fontSize: chartTickFont }} domain={['auto', 'auto']} />
+	                            <YAxis yAxisId="right" width={0} orientation="right" tick={false} axisLine={false} domain={['auto', 'auto']} />
+	                            <Tooltip />
+	                            <Area yAxisId="left" type="monotone" dataKey="close" name="Close" stroke="#f97316" fill="rgba(249,115,22,0.2)" />
+	                            <Line yAxisId="left" type="monotone" dataKey="ma25" name="MA25" stroke="#38bdf8" dot={false} />
+	                            <Bar yAxisId="right" dataKey="volume" name="Volume" fill="rgba(56,189,248,0.25)" />
+	                            <Brush
+	                              dataKey="date"
+	                              height={34}
+	                              stroke="#94a3b8"
+	                              travellerWidth={18}
+	                              startIndex={zoomRange.start}
+	                              endIndex={zoomRange.end}
+	                              onChange={handleBrushChange}
+	                              data={chartData}
+	                            />
+	                          </ComposedChart>
+	                        </ResponsiveContainer>
+	                      )}
+	                    </div>
+	                  </div>
 
-                <div className="mchart-body">
-                  <div className={`chart-card mchart-chart chart-zoom ${zoomArmed ? 'armed' : ''}`} ref={chartWheelRef}>
-                    <div className="chart-title">Price · MA25 · Volume</div>
-                    <div className="mchart-chart-body">
-                      {pricesLoading ? (
-                        <div className="mchart-chart-empty">차트 로딩 중...</div>
-                      ) : chartData.length === 0 ? (
-                        <div className="mchart-chart-empty">가격 데이터가 없습니다.</div>
-                      ) : (
-                        <ResponsiveContainer width="100%" height="100%">
-                          <ComposedChart
-                            data={zoomedData}
-                            margin={{ left: 0, right: 0, top: 12, bottom: 8 }}
-                          >
-                            <CartesianGrid stroke="rgba(148,163,184,0.15)" strokeDasharray="3 3" />
-                            <XAxis dataKey="date" tick={{ fontSize: chartTickFont }} minTickGap={20} />
-                            <YAxis yAxisId="left" tick={{ fontSize: chartTickFont }} domain={['auto', 'auto']} />
-                            <YAxis yAxisId="right" orientation="right" tick={false} axisLine={false} domain={['auto', 'auto']} />
-                            <Tooltip />
-                            <Area yAxisId="left" type="monotone" dataKey="close" name="Close" stroke="#f97316" fill="rgba(249,115,22,0.2)" />
-                            <Line yAxisId="left" type="monotone" dataKey="ma25" name="MA25" stroke="#38bdf8" dot={false} />
-                            <Bar yAxisId="right" dataKey="volume" name="Volume" fill="rgba(56,189,248,0.25)" />
-                            <Brush
-                              dataKey="date"
-                              height={34}
-                              stroke="#94a3b8"
-                              travellerWidth={18}
-                              startIndex={zoomRange.start}
-                              endIndex={zoomRange.end}
-                              onChange={handleBrushChange}
-                              data={chartData}
-                            />
-                          </ComposedChart>
-                        </ResponsiveContainer>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mchart-foot">
-                  <div className="mchart-kpi">
-                    <div>
+	                  <div className="chart-card mchart-table">
+	                    <div className="chart-title">최근 가격</div>
+	                    <div className="mchart-table-body">
+	                      <div className="mchart-row mchart-row--head">
+	                        <span>Date</span>
+	                        <span>Close</span>
+	                        <span>Amount</span>
+	                        <span>괴리율</span>
+	                      </div>
+	                      {pricesLoading ? (
+	                        <div className="mchart-table-empty">불러오는 중...</div>
+	                      ) : null}
+	                      {!pricesLoading && tableRows.map((row) => (
+	                        <div key={row.date} className="mchart-row">
+	                          <span className="mono">{row.date}</span>
+	                          <span className="b">{formatCurrency(row.close)}</span>
+	                          <span>{formatCurrency(row.amount)}</span>
+	                          <span className={(row.disparity ?? 0) <= 0 ? 'down' : 'up'}>
+	                            {formatPct((row.disparity || 0) * 100)}
+	                          </span>
+	                        </div>
+	                      ))}
+	                      {!pricesLoading && tableRows.length === 0 ? (
+	                        <div className="mchart-table-empty">가격 데이터가 없습니다.</div>
+	                      ) : null}
+	                    </div>
+	                  </div>
+	                </div>
+	
+	                <div className="mchart-foot">
+	                  <div className="mchart-kpi">
+	                    <div>
                       <div className="mchart-kpi__label">현재가</div>
                       <div className="mchart-kpi__value">{formatCurrency(livePrice)}</div>
                     </div>
