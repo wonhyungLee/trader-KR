@@ -92,6 +92,7 @@ function App() {
   const [isStockPanelOpen, setIsStockPanelOpen] = useState(false)
   const [updateKey, setUpdateKey] = useState(0)
   const prevCandidatesRef = useRef([])
+  const [selectionHistory, setSelectionHistory] = useState({ events: [], window_days: 0, anchor_date: null, dates: [] })
 
   const [isMobile, setIsMobile] = useState(() => {
     try {
@@ -322,9 +323,19 @@ function App() {
           const payload = data && typeof data === 'object' ? data : {}
           const newCandidates = asArray(payload.candidates)
 
-          const prevCodes = prevCandidatesRef.current.map((c) => c.code).join(',')
+          const prevCandidates = asArray(prevCandidatesRef.current)
+          const prevCodes = prevCandidates.map((c) => c.code).join(',')
           const newCodes = newCandidates.map((c) => c.code).join(',')
           if (prevCodes !== newCodes && !isInitial) setUpdateKey((prev) => prev + 1)
+
+          const historyPayload = payload.selection_history && typeof payload.selection_history === 'object' ? payload.selection_history : {}
+          setSelectionHistory({
+            events: asArray(historyPayload.events),
+            window_days: Number(historyPayload.window_days || 0),
+            anchor_date: historyPayload.anchor_date || null,
+            dates: asArray(historyPayload.dates),
+          })
+
           prevCandidatesRef.current = newCandidates
 
           setSelection({
@@ -595,6 +606,10 @@ function App() {
       items: asArray(selectionStageItems?.[key])
     }))
   }, [stageMap, stageNodes, selectionStageItems])
+
+  const selectionHistoryEvents = asArray(selectionHistory?.events)
+  const selectionEnteredEvents = selectionHistoryEvents.filter((event) => event?.event_type === 'entered')
+  const selectionExitedEvents = selectionHistoryEvents.filter((event) => event?.event_type === 'exited')
 
   const handleFilterToggle = async (key) => {
     if (filterTogglePending) return
@@ -1112,7 +1127,60 @@ function App() {
                         ))}
                       </tbody>
                     </table>
-	                  </div>
+                  </div>
+
+                  <div className="safety-callout" aria-label="추천 이력 안내">
+                    <div className="safety-row">
+                      <div className="safety-title">최근 {Number(selectionHistory?.window_days || 0)}일 추천 이력</div>
+                    </div>
+                    <div className="safety-text">
+                      전략에서 추천 후보로 들어온 종목과 빠져나간 종목을 날짜별로 추적합니다.
+                      이탈 항목에는 해당 날짜 전략 조건 기반 이탈 사유를 함께 표시합니다.
+                    </div>
+                  </div>
+
+                  <div className="change-panel" aria-label="추천 변동 로그">
+                    <div className="change-head">
+                      <div className="change-title">추천 변동 (최근 {selectionHistory?.window_days || 0}일)</div>
+                      <div className="change-meta">신규 {selectionEnteredEvents.length} · 이탈 {selectionExitedEvents.length}</div>
+                    </div>
+                    <div className="change-grid">
+                      <div className="change-col">
+                        <div className="change-col-title">신규</div>
+                        {selectionEnteredEvents.length ? (
+                          <ul className="change-list">
+                            {selectionEnteredEvents.map((event) => (
+                              <li key={`added-${event.date}-${event.code}`}>
+                                <span className="change-date">{event.date || ''}</span>{' '}
+                                <span className="mono">{event.code}</span> {event.name || ''}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="change-empty">변동 없음</div>
+                        )}
+                      </div>
+                      <div className="change-col">
+                        <div className="change-col-title">이탈</div>
+                        {selectionExitedEvents.length ? (
+                          <ul className="change-list">
+                            {selectionExitedEvents.map((event) => (
+                              <li key={`removed-${event.date}-${event.code}`}>
+                                <span className="change-date">{event.date || ''}</span>{' '}
+                                <span className="mono">{event.code}</span> {event.name || ''}{' '}
+                                <span className="change-reason">({event.exit_reason || '이탈'})</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="change-empty">변동 없음</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="change-foot">
+                      이탈 사유는 해당 날짜 기준 전략 조건으로 판정했습니다.
+                    </div>
+                  </div>
 	                </div>
 	              </div>
 	            )}

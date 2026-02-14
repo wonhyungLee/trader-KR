@@ -11,9 +11,11 @@ import json
 import subprocess
 import time
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -61,7 +63,12 @@ SELECTION_NOTIFY_COOLDOWN_SEC = int(os.getenv("SELECTION_NOTIFY_COOLDOWN_SEC", "
 SELECTION_NOTIFY_INTERVAL_SEC = int(os.getenv("SELECTION_NOTIFY_INTERVAL_SEC", "60"))
 # If there are no new candidates, re-recommend the last sent ones at this interval.
 # Default: 6 hours (can be overridden by env).
-SELECTION_NOTIFY_REPEAT_SEC = int(os.getenv("SELECTION_NOTIFY_REPEAT_SEC", "21600"))
+# Safety: never notify more frequently than 6 hours to avoid spam.
+SELECTION_NOTIFY_REPEAT_SEC = max(21600, int(os.getenv("SELECTION_NOTIFY_REPEAT_SEC", "21600")))
+SELECTION_HISTORY_DAYS = max(1, min(30, int(os.getenv("SELECTION_HISTORY_DAYS", "5"))))
+# Selection snapshot queries only need a short trailing window (we compute ret3/ma25_prev from last 4 rows).
+# Limiting the scan range is critical for SQLite performance (avoid windowing over the full history).
+SELECTION_SNAPSHOT_RANGE_DAYS = max(30, min(730, int(os.getenv("SELECTION_SNAPSHOT_RANGE_DAYS", "365"))))
 _selection_notify_health: Dict[str, Any] = {"last_error": None, "last_error_ts": 0.0, "last_ok_ts": 0.0}
 DISABLE_TRADING_ENDPOINTS = True
 _kis_price_client: Optional[KISPriceClient] = None
@@ -170,6 +177,8 @@ def _load_selection_notify_state(path: Path = SELECTION_NOTIFY_PATH) -> Dict[str
         "pending_codes": [],
         "last_sent_codes": [],  # last codes we recommended (new or repeat)
         "last_sent_ts": 0.0,  # last time we sent any recommendation
+        # Full candidate set at the last digest send (used to summarize add/remove changes).
+        "last_digest_all_codes": [],
     }
     if not path.exists():
         return default
@@ -194,6 +203,7 @@ def _save_selection_notify_state(payload: Dict[str, Any], path: Path = SELECTION
         "pending_codes": payload.get("pending_codes") or [],
         "last_sent_codes": payload.get("last_sent_codes") or [],
         "last_sent_ts": float(payload.get("last_sent_ts") or 0.0),
+        "last_digest_all_codes": payload.get("last_digest_all_codes") or [],
     }
     path.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -216,14 +226,75 @@ def _format_candidate_line(code: str, info: Dict[str, Any]) -> str:
         parts.append(f"disp={disp * 100:+.2f}%")
     return " ".join([p for p in parts if p])
 
+def _normalize_code(value: Any) -> str:
+    """Normalize codes for both KR (numeric) and US (ticker-like) universes."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return text.zfill(6)
+    return text
 
-def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) -> None:
+
+def _viewer_label(settings: Dict[str, Any]) -> str:
+    viewer_cfg = settings.get("viewer", {}) if isinstance(settings, dict) else {}
+    label = os.getenv("VIEWER_LABEL") or viewer_cfg.get("label") or "VIEWER-KR"
+    label = str(label or "").strip()
+    if not label:
+        label = "VIEWER-KR"
+    if label.startswith("[") and label.endswith("]"):
+        return label
+    return f"[{label}]"
+
+
+def _viewer_tz(settings: Dict[str, Any]) -> str:
+    viewer_cfg = settings.get("viewer", {}) if isinstance(settings, dict) else {}
+    tz = os.getenv("VIEWER_TZ") or viewer_cfg.get("tz") or "Asia/Seoul"
+    return str(tz or "Asia/Seoul").strip() or "Asia/Seoul"
+
+
+def _viewer_digest_max_items(settings: Dict[str, Any]) -> int:
+    viewer_cfg = settings.get("viewer", {}) if isinstance(settings, dict) else {}
+    raw = os.getenv("VIEWER_DIGEST_MAX_ITEMS") or viewer_cfg.get("digest_max_items") or 5
+    try:
+        n = int(raw)
+    except Exception:
+        n = 5
+    return max(1, min(n, 20))
+
+
+def _format_viewer_rec_line(code: str, info: Dict[str, Any]) -> str:
+    name = str((info or {}).get("name") or "").strip()
+    sector = str((info or {}).get("sector_name") or (info or {}).get("industry_name") or "").strip() or "UNKNOWN"
+
+    rank_val = (info or {}).get("rank")
+    try:
+        rank = int(str(rank_val).strip()) if str(rank_val or "").strip() else None
+    except Exception:
+        rank = None
+
+    disp = _safe_float((info or {}).get("disparity"))
+    # Match requested format: negative has '-', positive has no '+'.
+    disp_text = f"{disp * 100:.2f}%" if disp is not None else "N/A"
+
+    parts = [code]
+    if name:
+        parts.append(name)
+    parts.append(f"[{sector}]")
+    if rank is not None:
+        parts.append(f"(rank {rank})")
+    parts.append(f"disp {disp_text}")
+    return "- " + " ".join([p for p in parts if p])
+
+
+def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any], force: bool = False) -> None:
     now_ts = time.time()
     state_exists = SELECTION_NOTIFY_PATH.exists()
     state = _load_selection_notify_state()
 
     candidates = snapshot.get("candidates") or []
-    codes = [str(c.get("code") or "").zfill(6) for c in candidates if isinstance(c, dict) and c.get("code")]
+    codes = [_normalize_code(c.get("code")) for c in candidates if isinstance(c, dict) and c.get("code")]
+    codes = [c for c in codes if c]
 
     last_codes = set(state.get("last_codes") or [])
     pending = list(state.get("pending_codes") or [])
@@ -239,8 +310,9 @@ def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) 
         pending = [c for c in pending if c in codes_set]
 
     # Initialize state without sending notifications on first run (prevents spam on restarts).
-    if not last_codes and not state_exists:
-        seed = codes[: min(10, len(codes))]
+    if not force and not last_codes and not state_exists:
+        max_items = _viewer_digest_max_items(settings)
+        seed = codes[: min(max_items, len(codes))]
         _save_selection_notify_state(
             {
                 "last_codes": codes,
@@ -284,7 +356,7 @@ def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) 
         return str(url).strip()
 
     # Not due -> just update state.
-    if not repeat_due:
+    if not force and not repeat_due:
         _save_selection_notify_state(
             {
                 "last_codes": codes,
@@ -296,30 +368,86 @@ def _maybe_notify_selection(settings: Dict[str, Any], snapshot: Dict[str, Any]) 
         )
         return
 
-    info_map = {str(c.get("code") or "").zfill(6): c for c in candidates if isinstance(c, dict)}
+    info_map = {
+        _normalize_code(c.get("code")): c
+        for c in candidates
+        if isinstance(c, dict) and _normalize_code(c.get("code"))
+    }
 
     # Build digest message (1 per repeat_sec).
     rec_codes = pending if pending else codes
-    rec_codes = rec_codes[: min(10, len(rec_codes))]
-    rec_parts: list[str] = []
-    for code in rec_codes:
-        info = info_map.get(code) or {}
-        name = str(info.get("name") or "").strip()
-        rec_parts.append(f"{code} {name}".strip())
+    max_items = _viewer_digest_max_items(settings)
+    rec_codes = rec_codes[: min(max_items, len(rec_codes))]
 
-    head = "[selection] 추천"
-    if snapshot.get("date"):
-        head += f" date={snapshot.get('date')}"
-    if rec_parts:
-        head += f" ({len(rec_parts)}): " + ", ".join(rec_parts)
+    # Header (KST by default)
+    tz_name = _viewer_tz(settings)
+    try:
+        now_dt = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        now_dt = datetime.now(ZoneInfo("Asia/Seoul"))
+    ts = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    tz_abbr = now_dt.strftime("%Z") or "KST"
+    label = _viewer_label(settings)
+
+    lines: list[str] = [f"{label} {ts} {tz_abbr}"]
+
+    # Recommendations
+    date_str = str(snapshot.get("date") or "").strip()
+    if date_str:
+        lines.append(f"[최근 추천] (date={date_str})")
     else:
-        head += " (0): (추천 종목 없음)"
+        lines.append("[최근 추천]")
+    if rec_codes:
+        for code in rec_codes:
+            lines.append(_format_viewer_rec_line(code, info_map.get(code) or {}))
+    else:
+        lines.append("- (추천 종목 없음)")
 
-    lines = [head, _status_line()]
+    # System section
+    lines.append("")
+    status_line = _status_line()
+    if status_line.strip() == "상태: OK":
+        lines.append("[시스템] OK")
+    else:
+        detail = status_line.replace("상태:", "").strip()
+        lines.append(f"[시스템] {detail}" if detail else "[시스템] ERROR")
+
+    # System metrics (DB snapshots)
+    conn2 = None
+    try:
+        conn2 = get_conn()
+        universe_total = int(_count(conn2, "universe_members") or 0)
+        price_codes = int(_distinct_code_count(conn2, "daily_price") or 0)
+        price_rows = int(_count(conn2, "daily_price") or 0)
+        mm = _minmax(conn2, "daily_price")
+        mm_min = str(mm.get("min") or "").strip()
+        mm_max = str(mm.get("max") or "").strip()
+        refill_done = int(_count(conn2, "refill_progress WHERE status='DONE'") or 0)
+        job_runs = int(_count(conn2, "job_runs") or 0)
+    finally:
+        if conn2 is not None:
+            try:
+                conn2.close()
+            except Exception:
+                pass
+
+    lines.append(f"Universe: {universe_total} | Price codes: {price_codes} | Price rows: {price_rows}")
+    if mm_min and mm_max:
+        lines.append(f"Daily range: {mm_min} ~ {mm_max}")
+    elif mm_max:
+        lines.append(f"Daily range: ~ {mm_max}")
+    else:
+        lines.append("Daily range: -")
+
+    done_clamped = min(refill_done, universe_total) if universe_total > 0 else refill_done
+    remaining = max(universe_total - done_clamped, 0) if universe_total > 0 else 0
+    lines.append(f"Refill done: {done_clamped}/{universe_total} (remaining {remaining})")
+    lines.append(f"Job runs: {job_runs}")
+
     url = _site_url()
     if url:
-        lines.append(url)
-    msg = "\n".join([line for line in lines if line])
+        lines.append(f" | site: {url}")
+    msg = "\n".join(lines).rstrip()
     _async_notify(settings, msg)
 
     _save_selection_notify_state(
@@ -428,10 +556,6 @@ def _get_kis_price_client(settings: Dict[str, Any]) -> Optional[KISPriceClient]:
             logging.warning("KISPriceClient init failed; live prices disabled: %s", exc)
             return None
     return _kis_price_client
-
-
-def _normalize_code(code: Any) -> str:
-    return str(code or "").strip().zfill(6)
 
 
 def _set_candidate_ws_targets(codes: list[str]) -> None:
@@ -837,23 +961,169 @@ def _ensure_latest_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _build_selection_snapshot(
+def _selection_pass_disparity(
+    row: Any,
+    entry_mode: str,
+    buy_kospi: float,
+    buy_kosdaq: float,
+) -> bool:
+    has_get = hasattr(row, "get")
+    market = str((row.get("market") if has_get else None) or "KOSPI").upper()
+    threshold = buy_kospi if "KOSPI" in market else buy_kosdaq
+    try:
+        disp = _safe_float(row.get("disparity") if has_get else None)
+        if disp is None:
+            return False
+        if entry_mode == "trend_follow":
+            ret3 = _safe_float(row.get("ret3") if has_get else None) or 0.0
+            return disp >= threshold and ret3 >= 0
+        return disp <= threshold
+    except Exception:
+        return False
+
+
+def _selection_pass_trend(row: Any) -> bool:
+    has_get = hasattr(row, "get")
+    ma25 = _safe_float(row.get("ma25") if has_get else None)
+    ma25_prev = _safe_float(row.get("ma25_prev") if has_get else None)
+    if ma25 is None or ma25_prev is None:
+        return False
+    return ma25 > ma25_prev
+
+
+def _selection_candidate_stage_sets(payload: Dict[str, Any]) -> Dict[str, Any]:
+    stage_items = payload.get("stage_items")
+    if not isinstance(stage_items, dict):
+        return {"min_set": set(), "liq_set": set(), "disp_set": set(), "code_rows": {}}
+
+    min_rows = stage_items.get("min_amount")
+    liq_rows = stage_items.get("liquidity")
+    disp_rows = stage_items.get("disparity")
+
+    def _normalize_rows(rows: Any) -> list[Dict[str, Any]]:
+        if not isinstance(rows, list):
+            return []
+        cleaned = []
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("code") or "").strip():
+                cleaned.append(row)
+        return cleaned
+
+    min_rows = _normalize_rows(min_rows)
+    liq_rows = _normalize_rows(liq_rows)
+    disp_rows = _normalize_rows(disp_rows)
+
+    min_set = set(str(r.get("code")) for r in min_rows if str(r.get("code") or "").strip())
+    liq_set = set(str(r.get("code")) for r in liq_rows if str(r.get("code") or "").strip())
+    disp_set = set(str(r.get("code")) for r in disp_rows if str(r.get("code") or "").strip())
+    code_rows = {str(r.get("code")): r for r in liq_rows if str(r.get("code") or "").strip()}
+
+    return {"min_set": min_set, "liq_set": liq_set, "disp_set": disp_set, "code_rows": code_rows}
+
+
+def _selection_exit_reason(
+    code: str,
+    prev_snapshot: Dict[str, Any],
+    curr_snapshot: Dict[str, Any] | None = None,
+) -> str:
+    if not code:
+        return "이탈"
+    code = str(code).strip()
+    if not code:
+        return "이탈"
+
+    toggles = prev_snapshot.get("filter_toggles")
+    if not isinstance(toggles, dict):
+        toggles = {}
+    min_enabled = toggles.get("min_amount", True) is not False
+    liq_enabled = toggles.get("liquidity", True) is not False
+    disp_enabled = toggles.get("disparity", True) is not False
+
+    if not isinstance(prev_snapshot.get("stage_items"), dict):
+        return "이탈"
+    sets = _selection_candidate_stage_sets(prev_snapshot)
+    min_set = sets["min_set"]
+    liq_set = sets["liq_set"]
+    disp_set = sets["disp_set"]
+    row = sets["code_rows"].get(code)
+
+    summary = prev_snapshot.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    entry_mode = str(summary.get("entry_mode", "mean_reversion")).lower()
+    trend_filter = bool(summary.get("trend_filter"))
+    thresholds = summary.get("buy_thresholds", {})
+    if not isinstance(thresholds, dict):
+        thresholds = {}
+    buy_kospi = float(thresholds.get("kospi") or 0)
+    buy_kosdaq = float(thresholds.get("kosdaq") or 0)
+
+    if min_enabled and code not in min_set:
+        return "거래대금 기준 미달"
+    if liq_enabled and code not in liq_set:
+        return "거래대금 상위 순위 밖(유동성 필터)"
+    if disp_enabled and code not in disp_set:
+        if row:
+            if not _selection_pass_disparity(row, entry_mode, buy_kospi, buy_kosdaq):
+                return "괴리율(및 모멘텀) 조건 미충족"
+            if trend_filter and not _selection_pass_trend(row):
+                return "상승추세(MA25) 조건 붕괴"
+        return "괴리율/추세 조건 미충족"
+    if trend_filter and row is not None and not _selection_pass_trend(row):
+        return "상승추세(MA25) 조건 붕괴"
+
+    if isinstance(curr_snapshot, dict):
+        curr_sets = _selection_candidate_stage_sets(curr_snapshot)
+        curr_summary = curr_snapshot.get("summary")
+        if not isinstance(curr_summary, dict):
+            curr_summary = {}
+        curr_entry_mode = str(curr_summary.get("entry_mode", entry_mode)).lower()
+        curr_trend_filter = bool(curr_summary.get("trend_filter", trend_filter))
+        curr_thresholds = curr_summary.get("buy_thresholds", {})
+        if isinstance(curr_thresholds, dict):
+            curr_buy_kospi = float(curr_thresholds.get("kospi") or buy_kospi)
+            curr_buy_kosdaq = float(curr_thresholds.get("kosdaq") or buy_kosdaq)
+        else:
+            curr_buy_kospi = buy_kospi
+            curr_buy_kosdaq = buy_kosdaq
+
+        curr_toggles = curr_snapshot.get("filter_toggles")
+        if isinstance(curr_toggles, dict):
+            curr_min_enabled = curr_toggles.get("min_amount", True) is not False
+            curr_liq_enabled = curr_toggles.get("liquidity", True) is not False
+            curr_disp_enabled = curr_toggles.get("disparity", True) is not False
+        else:
+            curr_min_enabled = min_enabled
+            curr_liq_enabled = liq_enabled
+            curr_disp_enabled = disp_enabled
+
+        curr_row = curr_sets["code_rows"].get(code)
+        if curr_row is None:
+            curr_row = row
+
+        if curr_min_enabled and code not in curr_sets["min_set"]:
+            return "거래대금 기준 미달"
+        if curr_liq_enabled and code not in curr_sets["liq_set"]:
+            return "거래대금 상위 순위 밖(유동성 필터)"
+        if curr_disp_enabled and code not in curr_sets["disp_set"]:
+            if curr_row:
+                if not _selection_pass_disparity(curr_row, curr_entry_mode, curr_buy_kospi, curr_buy_kosdaq):
+                    return "괴리율(및 모멘텀) 조건 미충족"
+                if curr_trend_filter and not _selection_pass_trend(curr_row):
+                    return "상승추세(MA25) 조건 붕괴"
+            return "괴리율/추세 조건 미충족"
+        if curr_trend_filter and curr_row is not None and not _selection_pass_trend(curr_row):
+            return "상승추세(MA25) 조건 붕괴"
+
+    return "최종 후보 수/섹터 제한"
+
+
+def _build_selection_snapshot_payload(
     conn: sqlite3.Connection,
     settings: Dict[str, Any],
-    force: bool = False,
-    notify: bool = False,
+    as_of_date: str | None = None,
+    date_range_start: str | None = None,
 ) -> Dict[str, Any]:
-    now_ts = time.time()
-
-    def _cache_set(payload: Dict[str, Any]) -> Dict[str, Any]:
-        # Compute time can exceed cache TTL; stamp cache at commit time.
-        _selection_cache.update({"ts": time.time(), "data": payload})
-        return payload
-
-    cached = _selection_cache.get("data")
-    if not force and cached and now_ts - _selection_cache.get("ts", 0) < 30:
-        return cached
-
     params = load_strategy(settings)
     min_amount = float(getattr(params, "min_amount", 0) or 0)
     liquidity_rank = int(getattr(params, "liquidity_rank", 0) or 0)
@@ -867,31 +1137,50 @@ def _build_selection_snapshot(
     take_profit_ret = float(getattr(params, "take_profit_ret", 0) or 0)
     trend_filter = bool(getattr(params, "trend_ma25_rising", False))
     filter_toggles = _load_filter_toggles()
-    min_enabled = filter_toggles.get("min_amount", True)
-    liq_enabled = filter_toggles.get("liquidity", True)
-    disp_enabled = filter_toggles.get("disparity", True)
+    min_enabled = bool(filter_toggles.get("min_amount", True))
+    liq_enabled = bool(filter_toggles.get("liquidity", True))
+    disp_enabled = bool(filter_toggles.get("disparity", True))
+
+    if not as_of_date:
+        try:
+            row = conn.execute("SELECT MAX(date) FROM daily_price").fetchone()
+            as_of_date = str(row[0]) if row and row[0] else None
+        except Exception:
+            as_of_date = None
+    if as_of_date and not date_range_start:
+        try:
+            asof_dt = datetime.strptime(str(as_of_date), "%Y-%m-%d").date()
+            date_range_start = (asof_dt - timedelta(days=SELECTION_SNAPSHOT_RANGE_DAYS)).strftime("%Y-%m-%d")
+        except Exception:
+            date_range_start = None
 
     universe_df = pd.read_sql_query("SELECT code, name, market, group_name FROM universe_members", conn)
     codes = universe_df["code"].dropna().astype(str).tolist()
     if not codes:
-        data = {"date": None, "stages": [], "candidates": [], "summary": {"total": 0}, "filter_toggles": filter_toggles}
-        return _cache_set(data)
+        return {"date": None, "stages": [], "candidates": [], "summary": {"total": 0}, "filter_toggles": filter_toggles}
 
     placeholder = ",".join("?" * len(codes))
+    date_filter = "WHERE code IN (%s)" % placeholder
+    sql_params: list[Any] = list(codes)
+    if as_of_date and date_range_start:
+        date_filter = "WHERE code IN (%s) AND date >= ? AND date <= ?" % placeholder
+        sql_params = list(codes) + [str(date_range_start), str(as_of_date)]
+    elif as_of_date:
+        date_filter = "WHERE code IN (%s) AND date <= ?" % placeholder
+        sql_params = list(codes) + [str(as_of_date)]
     sql = f"""
         SELECT code, date, close, amount, ma25, disparity
         FROM (
             SELECT code, date, close, amount, ma25, disparity,
                    ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
             FROM daily_price
-            WHERE code IN ({placeholder})
+            {date_filter}
         )
         WHERE rn <= 4
     """
-    df = pd.read_sql_query(sql, conn, params=codes)
+    df = pd.read_sql_query(sql, conn, params=sql_params)
     if df.empty:
-        data = {"date": None, "stages": [], "candidates": [], "summary": {"total": len(codes)}, "filter_toggles": filter_toggles}
-        return _cache_set(data)
+        return {"date": as_of_date, "stages": [], "candidates": [], "summary": {"total": len(codes)}, "filter_toggles": filter_toggles}
 
     df = df.sort_values(["code", "date"])
     df["ma25_prev"] = df.groupby("code")["ma25"].shift(1)
@@ -919,19 +1208,15 @@ def _build_selection_snapshot(
     if liquidity_rank and liq_enabled:
         stage_liq = stage_liq.head(liquidity_rank)
 
-    def _pass_disparity(row) -> bool:
-        market = row.get("market") or "KOSPI"
-        threshold = buy_kospi if "KOSPI" in market else buy_kosdaq
-        try:
-            disp = float(row.get("disparity") or 0)
-            if entry_mode == "trend_follow":
-                r3 = float(row.get("ret3") or 0)
-                return disp >= threshold and r3 >= 0
-            return disp <= threshold
-        except Exception:
-            return False
-
-    stage_disp = stage_liq[stage_liq.apply(_pass_disparity, axis=1)] if disp_enabled else stage_liq
+    stage_disp = stage_liq[stage_liq.apply(
+        lambda row: _selection_pass_disparity(
+            row,
+            entry_mode,
+            buy_kospi,
+            buy_kosdaq,
+        ),
+        axis=1,
+    )] if disp_enabled else stage_liq
     if disp_enabled and trend_filter:
         stage_disp = stage_disp[stage_disp["ma25_prev"].notna() & (stage_disp["ma25"] > stage_disp["ma25_prev"])]
 
@@ -982,6 +1267,10 @@ def _build_selection_snapshot(
                 "amount": _safe_float(row.get("amount")),
                 "close": _safe_float(row.get("close")),
                 "disparity": _safe_float(row.get("disparity")),
+                # Extra fields for "why did it disappear?" explanations on the UI.
+                "ma25": _safe_float(row.get("ma25")),
+                "ma25_prev": _safe_float(row.get("ma25_prev")),
+                "ret3": _safe_float(row.get("ret3")),
             })
         return rows
 
@@ -999,15 +1288,12 @@ def _build_selection_snapshot(
             "close": final_p,
             "amount": _safe_float(row.get("amount")),
             "disparity": _safe_float(row.get("disparity")),
+            "ma25": _safe_float(row.get("ma25")),
+            "ma25_prev": _safe_float(row.get("ma25_prev")),
+            "ret3": _safe_float(row.get("ret3")),
             "sector_name": row.get("sector_name"),
             "industry_name": row.get("industry_name"),
         })
-
-    # Update candidate-only realtime WS targets.
-    try:
-        _set_candidate_ws_targets([c.get("code") for c in candidates if isinstance(c, dict)])
-    except Exception:
-        pass
 
     stages = [
         {"key": "universe", "label": "Universe", "count": total, "value": len(codes), "enabled": True},
@@ -1017,8 +1303,9 @@ def _build_selection_snapshot(
         {"key": "final", "label": "Max Positions", "count": len(final), "value": max_positions, "enabled": True},
     ]
 
-    data = {
-        "date": latest["date"].max(),
+    return {
+        "date": as_of_date or latest["date"].max(),
+        "data_health": data_health,
         "stages": stages,
         "candidates": candidates,
         "stage_items": {
@@ -1035,15 +1322,170 @@ def _build_selection_snapshot(
             "entry_mode": entry_mode,
             "max_positions": max_positions,
             "max_per_sector": max_per_sector,
+            "buy_thresholds": {"kospi": buy_kospi, "kosdaq": buy_kosdaq},
         },
         "filter_toggles": filter_toggles,
         "pricing": {"sell_rules": {"take_profit_ret": take_profit_ret}},
     }
-    # Ensure JSON-safe values (no NaN/Inf)
+
+
+def _build_selection_history(
+    conn: sqlite3.Connection,
+    settings: Dict[str, Any],
+    as_of_date: str | None = None,
+    days: int = SELECTION_HISTORY_DAYS,
+) -> Dict[str, Any]:
+    try:
+        requested_days = max(1, int(days))
+    except Exception:
+        requested_days = SELECTION_HISTORY_DAYS
+    requested_days = max(1, min(30, requested_days))
+
+    date_rows = []
+    if as_of_date:
+        date_rows = conn.execute(
+            """
+            SELECT DISTINCT date
+            FROM daily_price
+            WHERE date <= ?
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            (str(as_of_date), requested_days + 1),
+        ).fetchall()
+    else:
+        date_rows = conn.execute(
+            """
+            SELECT DISTINCT date
+            FROM daily_price
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            (requested_days + 1,),
+        ).fetchall()
+
+    dates = [str(r[0]) for r in date_rows if r and str(r[0]).strip()]
+    if not dates:
+        return {"window_days": requested_days, "anchor_date": str(as_of_date or ""), "events": []}
+
+    # Keep newest->oldest for transition diff.
+    snapshots: list[Dict[str, Any]] = []
+    range_start: str | None = None
+    if len(dates) >= 1:
+        try:
+            oldest = datetime.strptime(dates[-1], "%Y-%m-%d").date()
+            range_start = (oldest - timedelta(days=45)).strftime("%Y-%m-%d")
+        except Exception:
+            range_start = None
+
+    for date_key in dates[:requested_days + 1]:
+        snapshots.append(_build_selection_snapshot_payload(conn, settings, as_of_date=date_key, date_range_start=range_start))
+
+    # Drop rows without data to avoid false events.
+    snapshots = [s for s in snapshots if isinstance(s, dict) and s.get("date")]
+    if len(snapshots) < 2:
+        base_payload = snapshots[0] if snapshots else {}
+        return {
+            "window_days": requested_days,
+            "anchor_date": base_payload.get("date"),
+            "events": [],
+            "dates": dates[:len(snapshots)],
+        }
+
+    candidate_rows = []
+    event_dates = set(dates[:requested_days])
+
+    for idx in range(len(snapshots) - 1):
+        newer = snapshots[idx]
+        older = snapshots[idx + 1]
+        newer_date = newer.get("date")
+        if not newer_date:
+            continue
+        if str(newer_date) not in event_dates:
+            continue
+        older_code_rows = [c for c in older.get("candidates") if isinstance(c, dict)]
+        newer_code_rows = [c for c in newer.get("candidates") if isinstance(c, dict)]
+        older_codes = {
+            str(c.get("code") or ""): c for c in older_code_rows if str(c.get("code") or "").strip()
+        }
+        older_set = set(older_codes.keys())
+        newer_codes = {
+            str(c.get("code") or ""): c for c in newer_code_rows if str(c.get("code") or "").strip()
+        }
+        newer_set = set(newer_codes.keys())
+
+        entered = sorted(newer_set - older_set)
+        exited = sorted(older_set - newer_set)
+
+        for code in entered:
+            row = newer_codes.get(code) or {}
+            candidate_rows.append({
+                "event_type": "entered",
+                "date": newer_date,
+                "code": code,
+                "name": str(row.get("name") or "").strip(),
+                "market": str(row.get("market") or "").strip(),
+                "rank": int(row.get("rank") or 0) if isinstance(row.get("rank"), (int, float, str)) else None,
+            })
+
+        for code in exited:
+            row = older_codes.get(code) or {}
+            candidate_rows.append({
+                "event_type": "exited",
+                "date": newer_date,
+                "code": code,
+                "name": str(row.get("name") or "").strip(),
+                "market": str(row.get("market") or "").strip(),
+                "rank": int(row.get("rank") or 0) if isinstance(row.get("rank"), (int, float, str)) else None,
+                "exit_reason": _selection_exit_reason(code, older, newer),
+            })
+
+    candidate_rows = sorted(
+        candidate_rows,
+        key=lambda item: (
+            str(item.get("date") or ""),
+            1 if item.get("event_type") == "entered" else 0,
+            str(item.get("code") or ""),
+        ),
+        reverse=True,
+    )
+    return {
+        "window_days": requested_days,
+        "anchor_date": snapshots[0].get("date"),
+        "dates": [str(d) for d in dates[:requested_days + 1]],
+        "events": candidate_rows,
+    }
+
+
+def _build_selection_snapshot(
+    conn: sqlite3.Connection,
+    settings: Dict[str, Any],
+    force: bool = False,
+    notify: bool = False,
+    as_of_date: str | None = None,
+    include_history: bool = False,
+) -> Dict[str, Any]:
+    now_ts = time.time()
+    as_of_date = str(as_of_date) if as_of_date else None
+
+    cached = _selection_cache.get("data")
+    can_use_cache = not force and as_of_date is None and not include_history
+    if can_use_cache and cached and now_ts - _selection_cache.get("ts", 0) < 30:
+        return cached
+
+    data = _build_selection_snapshot_payload(conn, settings, as_of_date=as_of_date)
+
+    if include_history:
+        history_anchor = data.get("date") or as_of_date
+        data["selection_history"] = _build_selection_history(conn, settings, as_of_date=history_anchor, days=SELECTION_HISTORY_DAYS)
+
     data = _json_sanitize(data)
     if notify:
         _maybe_notify_selection(settings, data)
-    return _cache_set(data)
+
+    if as_of_date is None:
+        _selection_cache.update({"ts": time.time(), "data": data})
+    return data
 
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="")
@@ -1676,7 +2118,7 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
 def selection():
     conn = get_conn()
     settings = load_settings()
-    return jsonify(_build_selection_snapshot(conn, settings))
+    return jsonify(_build_selection_snapshot(conn, settings, include_history=True))
 
 
 @app.get("/status")

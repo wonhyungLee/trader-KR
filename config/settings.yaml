@@ -13,6 +13,7 @@ discord:
   digest_only: true
   allow_prefixes:
     - "[selection]"
+    - "[VIEWER-KR]"
 
 kis:
   env: "prod"

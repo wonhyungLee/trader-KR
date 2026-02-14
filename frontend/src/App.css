@@ -1668,6 +1668,128 @@ body {
   font-family: var(--font-mono);
 }
 
+/* Selection Change Guide + Delta Log */
+.safety-callout {
+  margin-top: 14px;
+  padding: 14px 14px 12px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(249, 115, 22, 0.06));
+}
+
+.safety-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.safety-title {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.safety-toggle {
+  border: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.safety-text {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.safety-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.change-panel {
+  margin-top: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.change-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.change-title {
+  font-weight: 800;
+}
+
+.change-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.change-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.change-col {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(14, 21, 32, 0.35);
+}
+
+.change-col-title {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.change-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.change-date {
+  color: var(--muted);
+  margin-right: 4px;
+  font-size: 11px;
+}
+
+.change-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.change-reason {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.change-foot {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
 @media (max-width: 768px) {
   .candidate-table td {
     padding: 12px 10px;
@@ -1675,6 +1797,9 @@ body {
   .candidate-table th:nth-child(3),
   .candidate-table td:nth-child(3) {
     display: none; /* Hide market on small mobile */
+  }
+  .change-grid {
+    grid-template-columns: 1fr;
   }
 }
 
