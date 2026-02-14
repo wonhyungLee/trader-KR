@@ -1192,6 +1192,8 @@ body {
     height: 100dvh;
     max-height: 100vh;
     max-height: 100dvh;
+    height: calc(var(--app-vh, 1vh) * 100);
+    max-height: calc(var(--app-vh, 1vh) * 100);
     border-radius: 0;
     padding: calc(14px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
   }

@@ -123,6 +123,41 @@ function App() {
     }
   }, [])
 
+  // Mobile viewport height fix: 100vh can exceed the visible area on mobile browsers (URL bar, etc.).
+  // We compute a stable "1vh" in px and use it in CSS where needed.
+  useEffect(() => {
+    const setVh = () => {
+      try {
+        const h = (window.visualViewport && window.visualViewport.height) ? window.visualViewport.height : window.innerHeight
+        if (!h || !Number.isFinite(h)) return
+        document.documentElement.style.setProperty('--app-vh', `${h * 0.01}px`)
+      } catch {
+        // ignore
+      }
+    }
+    setVh()
+    window.addEventListener('resize', setVh)
+    window.addEventListener('orientationchange', setVh)
+    if (window.visualViewport) {
+      try {
+        window.visualViewport.addEventListener('resize', setVh)
+      } catch {
+        // ignore
+      }
+    }
+    return () => {
+      window.removeEventListener('resize', setVh)
+      window.removeEventListener('orientationchange', setVh)
+      if (window.visualViewport) {
+        try {
+          window.visualViewport.removeEventListener('resize', setVh)
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, [])
+
   const hideCoupangBanner = useCallback(() => {
     const hideUntil = Date.now() + COUPANG_BANNER_HIDE_MS
     try {
