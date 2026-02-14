@@ -757,7 +757,8 @@ body {
 
 .chart-zoom.armed {
   /* Disable browser pinch-zoom so we can interpret pinch as chart range zoom. */
-  touch-action: none;
+  /* Allow vertical scrolling (pan-y) while disabling pinch-zoom default action. */
+  touch-action: pan-y;
 }
 
 .chart-title {
@@ -1187,15 +1188,15 @@ body {
   }
 
   .modal-panel {
-    width: 100vw;
-    height: 100vh;
-    height: 100dvh;
-    max-height: 100vh;
-    max-height: 100dvh;
+    width: 100%;
+    max-width: 100%;
     height: calc(var(--app-vh, 1vh) * 100);
     max-height: calc(var(--app-vh, 1vh) * 100);
     border-radius: 0;
     padding: calc(14px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
+    overflow: hidden; /* avoid double-scroll + iOS vh quirks */
+    display: flex;
+    flex-direction: column;
   }
 
   .modal-head {
@@ -1230,6 +1231,10 @@ body {
 
   .chart-grid {
     gap: 12px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .chart-card {
@@ -1241,7 +1246,14 @@ body {
   }
 
   .price-table {
-    max-height: 42vh;
+    max-height: none;
+    overflow: visible;
+  }
+
+  /* Avoid sticky headers inside a nested scroller on mobile */
+  .price-row.head {
+    position: static;
+    top: auto;
   }
 
   .mobile-tabbar {
