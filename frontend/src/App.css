@@ -757,8 +757,7 @@ body {
 
 .chart-zoom.armed {
   /* Disable browser pinch-zoom so we can interpret pinch as chart range zoom. */
-  /* Allow vertical scrolling (pan-y) while disabling pinch-zoom default action. */
-  touch-action: pan-y;
+  touch-action: none;
 }
 
 .chart-title {
@@ -1180,7 +1179,7 @@ body {
     display: none;
   }
 
-  /* Mobile Chart Popup: use the full screen and keep controls reachable */
+  /* Mobile Chart Popup (Rewritten): fullscreen chart-only modal */
   .modal-overlay {
     padding: 0;
     align-items: stretch;
@@ -1193,67 +1192,161 @@ body {
     height: calc(var(--app-vh, 1vh) * 100);
     max-height: calc(var(--app-vh, 1vh) * 100);
     border-radius: 0;
-    padding: calc(14px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
-    overflow: hidden; /* avoid double-scroll + iOS vh quirks */
+    padding: 0;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
   }
 
-  .modal-head {
-    position: sticky;
-    top: 0;
-    z-index: 5;
+  .mchart {
+    height: 100%;
+    min-height: 0;
+    display: flex;
     flex-direction: column;
-    align-items: stretch;
+  }
+
+  .mchart-head {
+    padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
     gap: 10px;
-    padding: 12px 0;
-    margin-bottom: 12px;
-    background: rgba(10, 16, 24, 0.98);
     border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    background: rgba(10, 16, 24, 0.98);
   }
 
-  .modal-actions {
-    width: 100%;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 8px;
+  .mchart-close {
+    border: 1px solid var(--line);
+    background: rgba(15, 23, 42, 0.7);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 800;
   }
 
-  .range-tabs {
+  .mchart-head .zoom-toggle {
+    padding: 8px 10px;
+  }
+
+  .mchart-title {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .mchart-title .ticker {
+    font-size: 11px;
+  }
+
+  .mchart-title .name {
+    font-size: 14px;
+    font-weight: 900;
+    margin-top: 2px;
+    line-height: 1.15;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mchart-title .meta {
+    display: block;
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mchart-controls {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    background: rgba(10, 16, 24, 0.98);
+  }
+
+  .mchart-controls .range-tabs {
     max-width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
 
-  .range-tabs::-webkit-scrollbar {
+  .mchart-controls .range-tabs::-webkit-scrollbar {
     display: none;
   }
 
-  .chart-grid {
-    gap: 12px;
+  .mchart-body {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
   }
 
-  .chart-card {
-    padding: 10px;
+  .mchart-chart {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
-  .chart-summary {
-    padding: 10px 12px;
+  .mchart-chart-body {
+    flex: 1;
+    min-height: 0;
   }
 
-  .price-table {
-    max-height: none;
-    overflow: visible;
+  .mchart-chart-empty {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 13px;
   }
 
-  /* Avoid sticky headers inside a nested scroller on mobile */
-  .price-row.head {
-    position: static;
-    top: auto;
+  .mchart-foot {
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid rgba(148, 163, 184, 0.12);
+    background: rgba(10, 16, 24, 0.98);
+  }
+
+  .mchart-kpi {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .mchart-kpi__label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .mchart-kpi__value {
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    margin-top: 2px;
+  }
+
+  .mchart-kpi__delta {
+    white-space: nowrap;
+    border: 1px solid var(--line);
+    background: rgba(15, 23, 42, 0.8);
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 900;
+  }
+
+  .mchart-footmeta {
+    margin-top: 6px;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--muted);
   }
 
   .mobile-tabbar {
