@@ -1394,6 +1394,23 @@ def _build_selection_history(
 
     candidate_rows = []
     event_dates = set(dates[:requested_days])
+    close_cache: Dict[tuple[str, str], float | None] = {}
+
+    def _close_on(date_key: str | None, code_key: str | None) -> float | None:
+        if not date_key or not code_key:
+            return None
+        k = (str(date_key), str(code_key))
+        if k in close_cache:
+            return close_cache[k]
+        try:
+            row = conn.execute(
+                "SELECT close FROM daily_price WHERE date = ? AND code = ? LIMIT 1",
+                (k[0], k[1]),
+            ).fetchone()
+            close_cache[k] = _safe_float(row[0]) if row and len(row) else None
+        except Exception:
+            close_cache[k] = None
+        return close_cache[k]
 
     for idx in range(len(snapshots) - 1):
         newer = snapshots[idx]
@@ -1430,6 +1447,13 @@ def _build_selection_history(
 
         for code in exited:
             row = older_codes.get(code) or {}
+            prev_close = _safe_float(row.get("close"))
+            exit_close = _close_on(str(newer_date), str(code))
+            exit_ret1: float | None = None
+            exit_price_down = False
+            if prev_close is not None and exit_close is not None and prev_close > 0:
+                exit_ret1 = (exit_close - prev_close) / prev_close
+                exit_price_down = exit_ret1 < 0
             candidate_rows.append({
                 "event_type": "exited",
                 "date": newer_date,
@@ -1438,6 +1462,10 @@ def _build_selection_history(
                 "market": str(row.get("market") or "").strip(),
                 "rank": int(row.get("rank") or 0) if isinstance(row.get("rank"), (int, float, str)) else None,
                 "exit_reason": _selection_exit_reason(code, older, newer),
+                "exit_prev_close": prev_close,
+                "exit_close": exit_close,
+                "exit_ret1": exit_ret1,
+                "exit_price_down": exit_price_down,
             })
 
     candidate_rows = sorted(

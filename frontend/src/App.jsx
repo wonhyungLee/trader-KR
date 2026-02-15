@@ -93,6 +93,8 @@ function App() {
   const [updateKey, setUpdateKey] = useState(0)
   const prevCandidatesRef = useRef([])
   const [selectionHistory, setSelectionHistory] = useState({ events: [], window_days: 0, anchor_date: null, dates: [] })
+  const [changeTab, setChangeTab] = useState('exited')
+  const [mobileStageDetailsOpen, setMobileStageDetailsOpen] = useState(false)
 
   const [isMobile, setIsMobile] = useState(() => {
     try {
@@ -611,6 +613,30 @@ function App() {
   const selectionEnteredEvents = selectionHistoryEvents.filter((event) => event?.event_type === 'entered')
   const selectionExitedEvents = selectionHistoryEvents.filter((event) => event?.event_type === 'exited')
 
+  const openFromHistoryEvent = useCallback((event) => {
+    if (!event || typeof event !== 'object') return
+    const code = String(event.code || '').trim()
+    if (!code) return
+    const found = asArray(universe).find((row) => String(row?.code || '').trim() === code) || null
+    setSelected({
+      code,
+      name: event.name || found?.name || '',
+      market: event.market || found?.market || '',
+      sector_name: found?.sector_name,
+      industry_name: found?.industry_name
+    })
+    setModalOpen(true)
+  }, [universe])
+
+  // Mobile UX: default to a non-empty tab if possible (prevents showing an empty "이탈 0" first).
+  useEffect(() => {
+    if (!isMobile) return
+    const enteredCount = selectionEnteredEvents.length
+    const exitedCount = selectionExitedEvents.length
+    if (changeTab === 'exited' && exitedCount === 0 && enteredCount > 0) setChangeTab('entered')
+    if (changeTab === 'entered' && enteredCount === 0 && exitedCount > 0) setChangeTab('exited')
+  }, [isMobile, selectionEnteredEvents.length, selectionExitedEvents.length, changeTab])
+
   const handleFilterToggle = async (key) => {
     if (filterTogglePending) return
     const password = window.prompt('필터 토글 비밀번호를 입력하세요')
@@ -964,9 +990,9 @@ function App() {
             ) : (
               <div key={updateKey} className={updateKey > 0 ? "animate-update" : ""}>
                 {filterError ? <div className="error-banner">{filterError}</div> : null}
-                <div className="flow-grid">
-                  {stageNodes.map((stage) => (
-                    <div key={stage.key} className="flow-card">
+	                <div className="flow-grid">
+	                  {stageNodes.map((stage) => (
+	                    <div key={stage.key} className="flow-card">
                       <div className="flow-header">
                         <span>{stage.label}</span>
                         <strong>{stage.count}</strong>
@@ -983,13 +1009,27 @@ function App() {
                         <span style={{ width: `${Math.max(6, stage.ratio * 100)}%` }} />
                       </div>
                     </div>
-                  ))}
-                </div>
+	                  ))}
+	                </div>
 
-                <div className="filter-columns">
-                  {stageColumns.map((stage) => (
-                    <div key={stage.key} className={`filter-column ${filterToggles[stage.key] === false ? 'disabled' : ''}`}>
-                      <div className="filter-head">
+	                {isMobile ? (
+	                  <div className="mobile-detail-row">
+	                    <button
+	                      type="button"
+	                      className={`mobile-detail-btn ${mobileStageDetailsOpen ? 'open' : ''}`}
+	                      aria-expanded={mobileStageDetailsOpen}
+	                      onClick={() => setMobileStageDetailsOpen((prev) => !prev)}
+	                    >
+	                      {mobileStageDetailsOpen ? '필터 상세 접기' : '필터 상세 보기'}
+	                    </button>
+	                  </div>
+	                ) : null}
+
+	                {!isMobile || mobileStageDetailsOpen ? (
+	                <div className="filter-columns">
+	                  {stageColumns.map((stage) => (
+	                    <div key={stage.key} className={`filter-column ${filterToggles[stage.key] === false ? 'disabled' : ''}`}>
+	                      <div className="filter-head">
                         <div>
                           <div className="filter-tag">{stage.tag}</div>
                           <div className="filter-title-row">
@@ -1039,13 +1079,14 @@ function App() {
                         ))}
                         {stage.items.length === 0 && <div className="empty">통과 종목이 없습니다.</div>}
                       </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="final-board">
-                    <div className="final-head">
-                      <div>
+	                    </div>
+	                  ))}
+	                </div>
+	                ) : null}
+	
+	                <div className="final-board">
+	                    <div className="final-head">
+	                      <div>
                         <div className="filter-tag">Final</div>
                         <div className="filter-title-row">
                           <div className="final-title">매수 후보 (Selection)</div>
@@ -1071,88 +1112,179 @@ function App() {
                     <div className="filter-count">{Number(stageMap.final?.count || candidates.length || 0)}</div>
                   </div>
 
-                  <div key={`cand-${updateKey}`} className={`tableWrap ${updateKey > 0 ? 'animate-update' : ''}`}>
-                    <table className="candidate-table">
-                      <thead>
-                        <tr>
-                          <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {candidates.length === 0 ? (
-                          <tr className="empty-row"><td colSpan="6" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
-                        ) : candidates.map((r) => (
-                          <tr
-                            key={`${r.code}-${r.rank}`}
-                            onClick={() => {
-                              setSelected({
-                                code: r.code,
-                                name: r.name,
-                                market: r.market,
-                                sector_name: r.sector_name,
-                                industry_name: r.industry_name
-                              })
-                              setModalOpen(true)
-                            }}
-                          >
-                            <td><span className="rank-badge">{r.rank}</span></td>
-                            <td>
-                              <div className="candidate-name-cell">
-                                <span className="name">{r.name}</span>
-                                <span className="code">{r.code}</span>
-                                <span className="sector">
-                                  {([r.sector_name, r.industry_name].filter(Boolean).join(' · ') || 'UNKNOWN')}
-                                </span>
+                  {isMobile ? (
+                    <div key={`cand-${updateKey}`} className={`candidate-cards ${updateKey > 0 ? 'animate-update' : ''}`}>
+                      {candidates.length === 0 ? (
+                        <div className="empty candidate-empty">후보가 없습니다 (데이터/전략 조건 확인)</div>
+                      ) : candidates.map((r) => (
+                        <button
+                          type="button"
+                          key={`${r.code}-${r.rank}`}
+                          className="candidate-card"
+                          onClick={() => {
+                            setSelected({
+                              code: r.code,
+                              name: r.name,
+                              market: r.market,
+                              sector_name: r.sector_name,
+                              industry_name: r.industry_name
+                            })
+                            setModalOpen(true)
+                          }}
+                        >
+                          <div className="candidate-card-top">
+                            <span className="rank-badge">{r.rank}</span>
+                            <div className="candidate-card-title">
+                              <div className="candidate-card-name">{r.name}</div>
+                              <div className="candidate-card-sub">
+                                <span className="mono">{r.code}</span>
+                                <span className="market-tag">{r.market}</span>
                               </div>
-                            </td>
-                            <td><span className="market-tag">{r.market}</span></td>
-                            <td>
-                              <div className="candidate-metric">
-                                <strong className={(Number(r.disparity) || 0) <= 0 ? 'down' : 'up'}>
-                                  {formatPct((Number(r.disparity) || 0) * 100)}
-                                </strong>
+                              <div className="candidate-card-sector">
+                                {([r.sector_name, r.industry_name].filter(Boolean).join(' · ') || 'UNKNOWN')}
                               </div>
-                            </td>
-                            <td>
-                              <div className="candidate-metric">
-                                <strong>{formatCurrency(r.amount)}</strong>
-                              </div>
-                            </td>
-                            <td>
-                              <div className="candidate-metric">
-                                <strong>{formatCurrency(candidateLivePrices?.[r.code]?.price ?? r.close)}</strong>
-                              </div>
-                            </td>
+                            </div>
+                          </div>
+                          <div className="candidate-card-metrics">
+                            <div className="candidate-card-metric">
+                              <span>괴리율</span>
+                              <strong className={(Number(r.disparity) || 0) <= 0 ? 'down' : 'up'}>
+                                {formatPct((Number(r.disparity) || 0) * 100)}
+                              </strong>
+                            </div>
+                            <div className="candidate-card-metric">
+                              <span>거래대금</span>
+                              <strong>{formatCurrency(r.amount)}</strong>
+                            </div>
+                            <div className="candidate-card-metric">
+                              <span>현재가</span>
+                              <strong>{formatCurrency(candidateLivePrices?.[r.code]?.price ?? r.close)}</strong>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div key={`cand-${updateKey}`} className={`tableWrap ${updateKey > 0 ? 'animate-update' : ''}`}>
+                      <table className="candidate-table">
+                        <thead>
+                          <tr>
+                            <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div className="safety-callout" aria-label="추천 이력 안내">
-                    <div className="safety-row">
-                      <div className="safety-title">최근 {Number(selectionHistory?.window_days || 0)}일 추천 이력</div>
+                        </thead>
+                        <tbody>
+                          {candidates.length === 0 ? (
+                            <tr className="empty-row"><td colSpan="6" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
+                          ) : candidates.map((r) => (
+                            <tr
+                              key={`${r.code}-${r.rank}`}
+                              onClick={() => {
+                                setSelected({
+                                  code: r.code,
+                                  name: r.name,
+                                  market: r.market,
+                                  sector_name: r.sector_name,
+                                  industry_name: r.industry_name
+                                })
+                                setModalOpen(true)
+                              }}
+                            >
+                              <td><span className="rank-badge">{r.rank}</span></td>
+                              <td>
+                                <div className="candidate-name-cell">
+                                  <span className="name">{r.name}</span>
+                                  <span className="code">{r.code}</span>
+                                  <span className="sector">
+                                    {([r.sector_name, r.industry_name].filter(Boolean).join(' · ') || 'UNKNOWN')}
+                                  </span>
+                                </div>
+                              </td>
+                              <td><span className="market-tag">{r.market}</span></td>
+                              <td>
+                                <div className="candidate-metric">
+                                  <strong className={(Number(r.disparity) || 0) <= 0 ? 'down' : 'up'}>
+                                    {formatPct((Number(r.disparity) || 0) * 100)}
+                                  </strong>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="candidate-metric">
+                                  <strong>{formatCurrency(r.amount)}</strong>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="candidate-metric">
+                                  <strong>{formatCurrency(candidateLivePrices?.[r.code]?.price ?? r.close)}</strong>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                    <div className="safety-text">
-                      전략에서 추천 후보로 들어온 종목과 빠져나간 종목을 날짜별로 추적합니다.
-                      이탈 항목에는 해당 날짜 전략 조건 기반 이탈 사유를 함께 표시합니다.
-                    </div>
-                  </div>
+                  )}
 
                   <div className="change-panel" aria-label="추천 변동 로그">
                     <div className="change-head">
                       <div className="change-title">추천 변동 (최근 {selectionHistory?.window_days || 0}일)</div>
                       <div className="change-meta">신규 {selectionEnteredEvents.length} · 이탈 {selectionExitedEvents.length}</div>
                     </div>
+                    <div className="change-callout">
+                      <strong>매수 후보(Selection)</strong>는 "지금 기준 신규 진입 후보"입니다. 후보에서 사라지는 것은 자동 매도 신호가 아닐 수 있으니, 아래의 이탈 사유(조건/랭킹)를 확인하세요.
+                    </div>
+                    <div className="change-note">
+                      <strong>빨간색</strong>은 이탈 사유가 아니라 이탈일 종가 하락(주의)을 뜻합니다. 보유 중이면 리스크를 즉시 점검하세요. (즉시 매도 신호 아님)
+                    </div>
+                    {isMobile ? (
+                      <div className="change-tabs" role="tablist" aria-label="추천 변동 탭">
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={changeTab === 'entered'}
+                          className={changeTab === 'entered' ? 'active' : ''}
+                          onClick={() => setChangeTab('entered')}
+                        >
+                          신규 {selectionEnteredEvents.length}
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={changeTab === 'exited'}
+                          className={changeTab === 'exited' ? 'active' : ''}
+                          onClick={() => setChangeTab('exited')}
+                        >
+                          이탈 {selectionExitedEvents.length}
+                        </button>
+                      </div>
+                    ) : null}
                     <div className="change-grid">
+                      {!isMobile || changeTab === 'entered' ? (
                       <div className="change-col">
                         <div className="change-col-title">신규</div>
                         {selectionEnteredEvents.length ? (
                           <ul className="change-list">
                             {selectionEnteredEvents.map((event) => (
-                              <li key={`added-${event.date}-${event.code}`}>
-                                <span className="change-date">{event.date || ''}</span>{' '}
-                                <span className="mono">{event.code}</span> {event.name || ''}
+                              <li
+                                key={`added-${event.date}-${event.code}`}
+                                className="change-item"
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`${event.code || ''} ${event.name || ''} 상세보기`}
+                                onClick={() => openFromHistoryEvent(event)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault()
+                                    openFromHistoryEvent(event)
+                                  }
+                                }}
+                              >
+                                <div className="change-item-row">
+                                  <div className="change-item-main">
+                                    <span className="change-date">{event.date || ''}</span>
+                                    <span className="mono change-code">{event.code}</span>
+                                    <span className="change-name">{event.name || ''}</span>
+                                  </div>
+                                </div>
                               </li>
                             ))}
                           </ul>
@@ -1160,22 +1292,68 @@ function App() {
                           <div className="change-empty">변동 없음</div>
                         )}
                       </div>
+                      ) : null}
+                      {!isMobile || changeTab === 'exited' ? (
                       <div className="change-col">
                         <div className="change-col-title">이탈</div>
                         {selectionExitedEvents.length ? (
                           <ul className="change-list">
-                            {selectionExitedEvents.map((event) => (
-                              <li key={`removed-${event.date}-${event.code}`}>
-                                <span className="change-date">{event.date || ''}</span>{' '}
-                                <span className="mono">{event.code}</span> {event.name || ''}{' '}
-                                <span className="change-reason">({event.exit_reason || '이탈'})</span>
-                              </li>
-                            ))}
+                            {selectionExitedEvents.map((event) => {
+                              const ret1 = event?.exit_ret1
+                              const hasRet1 = ret1 !== null && ret1 !== undefined && Number.isFinite(Number(ret1))
+                              const retPct = hasRet1 ? Number(ret1) * 100 : null
+                              const isDown = retPct !== null ? retPct < 0 : false
+                              const isUp = retPct !== null ? retPct > 0 : false
+                              const retClass = isDown ? 'down' : (isUp ? 'up' : 'flat')
+                              const isRisk = Boolean(event?.exit_price_down)
+                              const reason = event?.exit_reason || '이탈'
+
+                              return (
+                                <li
+                                  key={`removed-${event.date}-${event.code}`}
+                                  className={`change-item ${isRisk ? 'exit-risk' : ''}`}
+                                  role="button"
+                                  tabIndex={0}
+                                  aria-label={`${event.code || ''} ${event.name || ''} 상세보기`}
+                                  onClick={() => openFromHistoryEvent(event)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                      e.preventDefault()
+                                      openFromHistoryEvent(event)
+                                    }
+                                  }}
+                                >
+                                  <div className="change-item-row">
+                                    <div className="change-item-main">
+                                      <span className="change-date">{event.date || ''}</span>
+                                      <span className="mono change-code">{event.code}</span>
+                                      <span className="change-name">{event.name || ''}</span>
+                                    </div>
+                                    <div className="change-item-meta">
+                                      {hasRet1 ? (
+                                        <span className={`change-pill ${retClass}`}>{formatPct(retPct)}</span>
+                                      ) : null}
+                                      {isRisk ? (
+                                        <span className="change-badge">하락 동반</span>
+                                      ) : (
+                                        <span className="change-item-reason">({reason})</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  {isRisk ? (
+                                    <div className="change-item-sub">
+                                      ({reason})
+                                    </div>
+                                  ) : null}
+                                </li>
+                              )
+                            })}
                           </ul>
                         ) : (
                           <div className="change-empty">변동 없음</div>
                         )}
                       </div>
+                      ) : null}
                     </div>
                     <div className="change-foot">
                       이탈 사유는 해당 날짜 기준 전략 조건으로 판정했습니다.
