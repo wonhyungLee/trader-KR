@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import math
 import os
 import random
+import re
 import sqlite3
 import logging
 import json
@@ -22,6 +24,9 @@ import pandas as pd
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+
+from stock_daytrade_engine.config import EngineConfig
+from stock_daytrade_engine.recommender import recommend_code
 
 from src.analyzer.backtest_runner import load_strategy
 from src.collectors.kis_price_client import KISPriceClient
@@ -50,6 +55,12 @@ except Exception:
     pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+def _env_flag(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None or v == "":
+        return default
+    return str(v).strip().lower() not in ("0", "false", "no", "off")
 
 DB_PATH = Path("data/market_data.db")
 FRONTEND_DIST = Path("frontend/dist")
@@ -83,6 +94,45 @@ _candidate_ws_targets: set[str] = set()
 _candidate_ws_prices: Dict[str, Dict[str, Any]] = {}
 _candidate_ws_thread: Optional[threading.Thread] = None
 _candidate_ws_health: Dict[str, Any] = {"last_error": None, "last_error_ts": 0.0, "last_ok_ts": 0.0}
+
+# Autotrade (webhook-based) - disabled by default (safety).
+AUTOTRADE_ENABLED = _env_flag("AUTOTRADE_ENABLED", False)
+AUTOTRADE_DRY_RUN = _env_flag("AUTOTRADE_DRY_RUN", True)
+AUTOTRADE_INFO_PATH = Path(os.getenv("AUTOTRADE_INFO_PATH", "../자동매매정보2.txt"))
+AUTOTRADE_WEBHOOK_URL = str(os.getenv("AUTOTRADE_WEBHOOK_URL", "") or "").strip()
+AUTOTRADE_WEBHOOK_PASSWORD = str(os.getenv("AUTOTRADE_WEBHOOK_PASSWORD", "") or "").strip()
+AUTOTRADE_KIS_NUMBER = str(os.getenv("AUTOTRADE_KIS_NUMBER", "2") or "2").strip() or "2"
+AUTOTRADE_QTY = max(1, int(os.getenv("AUTOTRADE_QTY", "1") or 1))
+AUTOTRADE_PLANNER_INTERVAL_SEC = max(30, int(os.getenv("AUTOTRADE_PLANNER_INTERVAL_SEC", "300") or 300))
+AUTOTRADE_DISPATCH_INTERVAL_SEC = max(5, int(os.getenv("AUTOTRADE_DISPATCH_INTERVAL_SEC", "60") or 60))
+AUTOTRADE_WEBHOOK_TIMEOUT_SEC = max(1.0, float(os.getenv("AUTOTRADE_WEBHOOK_TIMEOUT_SEC", "8") or 8.0))
+AUTOTRADE_ENGINE_OPTIMIZE = _env_flag("AUTOTRADE_ENGINE_OPTIMIZE", False)
+AUTOTRADE_ALLOW_DB_PRICE = _env_flag("AUTOTRADE_ALLOW_DB_PRICE", False)
+AUTOTRADE_EXIT_WINDOW_DAYS = max(
+    1,
+    min(30, int(os.getenv("AUTOTRADE_EXIT_WINDOW_DAYS", str(SELECTION_HISTORY_DAYS)) or SELECTION_HISTORY_DAYS)),
+)
+AUTOTRADE_MAX_EXIT_CODES = max(0, int(os.getenv("AUTOTRADE_MAX_EXIT_CODES", "60") or 60))
+AUTOTRADE_MAX_SELECTION_CODES = max(0, int(os.getenv("AUTOTRADE_MAX_SELECTION_CODES", "20") or 20))
+AUTOTRADE_SELL_PRICE_SOURCE = str(os.getenv("AUTOTRADE_SELL_PRICE_SOURCE", "target") or "target").strip().lower()
+AUTOTRADE_MAX_SEND_PER_TICK = max(1, int(os.getenv("AUTOTRADE_MAX_SEND_PER_TICK", "20") or 20))
+_autotrade_thread_lock = threading.Lock()
+_autotrade_planner_thread: Optional[threading.Thread] = None
+_autotrade_dispatch_thread: Optional[threading.Thread] = None
+_autotrade_health: Dict[str, Any] = {
+    "planner_last_error": None,
+    "planner_last_error_ts": 0.0,
+    "planner_last_ok_ts": 0.0,
+    "dispatch_last_error": None,
+    "dispatch_last_error_ts": 0.0,
+    "dispatch_last_ok_ts": 0.0,
+}
+_autotrade_state: Dict[str, Any] = {
+    "last_plan_date": None,
+    "last_exec_date": None,
+    "last_rebuild_ts": 0.0,
+    "last_dispatch_ts": 0.0,
+}
 
 # Coupang Partners banner cache (in-memory, best-effort).
 _coupang_banner_cache_lock = threading.Lock()
@@ -493,6 +543,19 @@ def _verify_toggle_password(payload: Dict[str, Any]) -> bool:
     return pw == KIS_TOGGLE_PASSWORD
 
 
+def _require_admin_query_password():
+    """Guard GET endpoints with the same password used for toggle APIs.
+
+    Note: querystring passwords can leak via logs; use only for server-admin debugging.
+    """
+    if not KIS_TOGGLE_PASSWORD:
+        return _disabled_response()
+    pw = str(request.args.get("password") or "")
+    if pw != KIS_TOGGLE_PASSWORD:
+        return jsonify({"error": "invalid_password"}), 403
+    return None
+
+
 def _safe_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -557,6 +620,835 @@ def _get_kis_price_client(settings: Dict[str, Any]) -> Optional[KISPriceClient]:
             return None
     return _kis_price_client
 
+
+# ---------- Autotrade (webhook-based) ----------
+
+def _autotrade_parse_info_file(path: Path) -> Dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return {}
+
+    out: Dict[str, str] = {}
+    try:
+        m = re.search(r"자동매매\\s*웹훅\\s*주소\\s*:\\s*(\\S+)", text)
+        if m:
+            out["url"] = str(m.group(1) or "").strip()
+    except Exception:
+        pass
+    try:
+        m = re.search(r"\"password\"\\s*:\\s*\"([^\"]+)\"", text)
+        if m:
+            out["password"] = str(m.group(1) or "").strip()
+    except Exception:
+        pass
+    try:
+        m = re.search(r"\"kis_number\"\\s*:\\s*\"([^\"]+)\"", text)
+        if m:
+            out["kis_number"] = str(m.group(1) or "").strip()
+    except Exception:
+        pass
+    return out
+
+
+def _autotrade_webhook_config() -> Dict[str, str]:
+    url = AUTOTRADE_WEBHOOK_URL
+    password = AUTOTRADE_WEBHOOK_PASSWORD
+    kis_number = AUTOTRADE_KIS_NUMBER
+
+    if (not url or not password) and AUTOTRADE_INFO_PATH.exists():
+        info = _autotrade_parse_info_file(AUTOTRADE_INFO_PATH)
+        if not url:
+            url = str(info.get("url") or "").strip()
+        if not password:
+            password = str(info.get("password") or "").strip()
+        if not kis_number:
+            kis_number = str(info.get("kis_number") or "").strip()
+
+    return {
+        "url": str(url or "").strip(),
+        "password": str(password or "").strip(),
+        "kis_number": str(kis_number or "2").strip() or "2",
+    }
+
+
+def _autotrade_now_utc_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _autotrade_today(settings: Dict[str, Any]) -> str:
+    tz_name = _viewer_tz(settings)
+    try:
+        return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _autotrade_next_weekday(date_str: str, tz_name: str = "Asia/Seoul") -> Optional[str]:
+    if not date_str:
+        return None
+    try:
+        d = datetime.strptime(str(date_str), "%Y-%m-%d").date()
+    except Exception:
+        return None
+    d = d + timedelta(days=1)
+    # Weekend skip only (holiday calendar not available here).
+    while d.weekday() >= 5:
+        d = d + timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def _krx_tick_size(price: float) -> float:
+    # Common KRX tick table (may differ for some products/periods; keep conservative).
+    p = float(price)
+    if p < 1000:
+        return 1.0
+    if p < 5000:
+        return 5.0
+    if p < 10000:
+        return 10.0
+    if p < 50000:
+        return 50.0
+    if p < 100000:
+        return 100.0
+    if p < 500000:
+        return 500.0
+    return 1000.0
+
+
+def _quantize_to_tick(price: float, tick: float, mode: str = "down") -> float:
+    if tick <= 0:
+        return float(price)
+    x = float(price) / float(tick)
+    if mode == "up":
+        return math.ceil(x) * tick
+    if mode == "nearest":
+        return round(x) * tick
+    return math.floor(x) * tick
+
+
+def _autotrade_round_limit_price(price: float, *, quote: str, side: str) -> float:
+    p = float(price)
+    quote = str(quote or "").upper()
+    side = str(side or "").lower()
+    if quote == "KRW":
+        tick = _krx_tick_size(p)
+        # Default: BUY rounds down, SELL rounds down (exit-friendly).
+        mode = "down" if side == "buy" else "down"
+        return float(_quantize_to_tick(p, tick, mode=mode))
+    # USD etc.
+    return float(round(p, 2))
+
+
+def _autotrade_format_price_str(price: float, *, quote: str) -> str:
+    q = str(quote or "").upper()
+    if q == "KRW":
+        try:
+            return str(int(round(float(price))))
+        except Exception:
+            return str(price)
+    # Default: 2dp
+    try:
+        return f"{float(price):.2f}"
+    except Exception:
+        return str(price)
+
+
+def _autotrade_trim_text(text: Any, max_len: int = 1200) -> str:
+    s = str(text or "").strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
+
+
+def _autotrade_recommend_code(code: str, *, db_path: str, optimize: bool) -> Dict[str, Any]:
+    cfg = EngineConfig(db_path=db_path, table="daily_price")
+    return recommend_code(code, cfg, optimize=bool(optimize))
+
+
+def _autotrade_upsert_plan(
+    conn: sqlite3.Connection,
+    *,
+    plan_date: str,
+    exec_date: str,
+    code: str,
+    name: str,
+    market: str,
+    rec: Dict[str, Any],
+    entry_price: Optional[float],
+    stop_price: Optional[float],
+    target_price: Optional[float],
+) -> None:
+    now = _autotrade_now_utc_iso()
+    payload_json = json.dumps(_json_sanitize(rec), ensure_ascii=False)
+    conn.execute(
+        """
+        INSERT INTO autotrade_engine_plan(
+          plan_date, exec_date, code, name, market,
+          engine_status, confidence,
+          entry_price, stop_price, target_price,
+          engine_payload_json,
+          created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(plan_date, code) DO UPDATE SET
+          exec_date=excluded.exec_date,
+          name=excluded.name,
+          market=excluded.market,
+          engine_status=excluded.engine_status,
+          confidence=excluded.confidence,
+          entry_price=excluded.entry_price,
+          stop_price=excluded.stop_price,
+          target_price=excluded.target_price,
+          engine_payload_json=excluded.engine_payload_json,
+          updated_at=excluded.updated_at
+        """,
+        (
+            str(plan_date),
+            str(exec_date),
+            str(code),
+            str(name or ""),
+            str(market or ""),
+            str(rec.get("status") or ""),
+            _safe_float(rec.get("confidence")),
+            _safe_float(entry_price),
+            _safe_float(stop_price),
+            _safe_float(target_price),
+            payload_json,
+            now,
+            now,
+        ),
+    )
+
+
+def _autotrade_upsert_queue_order(
+    conn: sqlite3.Connection,
+    *,
+    plan_date: str,
+    exec_date: str,
+    code: str,
+    name: str,
+    market: str,
+    side: str,
+    order_type: str,
+    qty: int,
+    trigger_op: str,
+    trigger_price: Optional[float],
+    limit_price: Optional[float],
+    exchange: str,
+    quote: str,
+    percent: str,
+    order_name: str,
+    webhook_url: str,
+    payload_json: str,
+    status: str,
+) -> None:
+    now = _autotrade_now_utc_iso()
+    conn.execute(
+        """
+        INSERT INTO autotrade_webhook_queue(
+          plan_date, exec_date, code, name, market,
+          side, order_type, qty,
+          trigger_op, trigger_price, limit_price,
+          exchange, quote, percent, order_name,
+          webhook_url, payload_json,
+          status,
+          attempts, last_error, last_price, last_response_code, last_response_body,
+          created_at, sent_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(exec_date, code, side) DO UPDATE SET
+          plan_date=excluded.plan_date,
+          name=excluded.name,
+          market=excluded.market,
+          order_type=excluded.order_type,
+          qty=excluded.qty,
+          trigger_op=excluded.trigger_op,
+          trigger_price=excluded.trigger_price,
+          limit_price=excluded.limit_price,
+          exchange=excluded.exchange,
+          quote=excluded.quote,
+          percent=excluded.percent,
+          order_name=excluded.order_name,
+          webhook_url=excluded.webhook_url,
+          payload_json=excluded.payload_json,
+          status=excluded.status,
+          updated_at=excluded.updated_at
+        WHERE autotrade_webhook_queue.status NOT IN ('SENT','DONE')
+        """,
+        (
+            str(plan_date),
+            str(exec_date),
+            str(code),
+            str(name or ""),
+            str(market or ""),
+            str(side),
+            str(order_type),
+            int(qty),
+            str(trigger_op),
+            _safe_float(trigger_price),
+            _safe_float(limit_price),
+            str(exchange or ""),
+            str(quote or ""),
+            str(percent or ""),
+            str(order_name or ""),
+            str(webhook_url or ""),
+            str(payload_json or ""),
+            str(status),
+            0,
+            None,
+            None,
+            None,
+            None,
+            now,
+            None,
+            now,
+        ),
+    )
+
+
+def _autotrade_cancel_missing(
+    conn: sqlite3.Connection,
+    *,
+    exec_date: str,
+    desired_buy_codes: list[str],
+    desired_sell_codes: list[str],
+) -> None:
+    now = _autotrade_now_utc_iso()
+
+    def _cancel_side(side: str, desired_codes: list[str]) -> None:
+        if desired_codes:
+            placeholder = ",".join("?" * len(desired_codes))
+            conn.execute(
+                f"""
+                UPDATE autotrade_webhook_queue
+                SET status='CANCELLED', updated_at=?
+                WHERE exec_date=?
+                  AND side=?
+                  AND status IN ('PENDING','FAILED')
+                  AND code NOT IN ({placeholder})
+                """,
+                (now, str(exec_date), side, *desired_codes),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE autotrade_webhook_queue
+                SET status='CANCELLED', updated_at=?
+                WHERE exec_date=?
+                  AND side=?
+                  AND status IN ('PENDING','FAILED')
+                """,
+                (now, str(exec_date), side),
+            )
+
+    _cancel_side("buy", desired_buy_codes)
+    _cancel_side("sell", desired_sell_codes)
+
+
+def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = _autotrade_webhook_config()
+    webhook_url = cfg.get("url") or ""
+    webhook_password = cfg.get("password") or ""
+    kis_number = cfg.get("kis_number") or "2"
+    if not webhook_url or not webhook_password:
+        raise RuntimeError("missing autotrade webhook url/password (set env or 자동매매정보2.txt)")
+
+    tz_name = _viewer_tz(settings)
+    today = _autotrade_today(settings)
+
+    conn = get_conn()
+    try:
+        # Plan date: latest daily close date in DB (today's execution date is usually next weekday of this).
+        row = conn.execute("SELECT MAX(date) FROM daily_price").fetchone()
+        plan_date = str(row[0]) if row and row[0] else None
+        if not plan_date:
+            return {"ok": False, "error": "no_daily_price_date"}
+        exec_date = _autotrade_next_weekday(plan_date, tz_name=tz_name)
+        if exec_date is None:
+            return {"ok": False, "error": "invalid_plan_date", "plan_date": plan_date}
+        # If data is stale and exec_date is already in the past, clamp to today (safer than trading on stale plan).
+        if exec_date < today:
+            exec_date = today
+
+        # Expire old queue rows (best-effort).
+        now = _autotrade_now_utc_iso()
+        conn.execute(
+            """
+            UPDATE autotrade_webhook_queue
+            SET status='EXPIRED', updated_at=?
+            WHERE status IN ('PENDING','FAILED')
+              AND exec_date < ?
+            """,
+            (now, str(today)),
+        )
+
+        # Skip expensive rebuild if nothing fundamental changed.
+        prev_plan = _autotrade_state.get("last_plan_date")
+        prev_exec = _autotrade_state.get("last_exec_date")
+        prev_ts = float(_autotrade_state.get("last_rebuild_ts") or 0.0)
+        if prev_ts > 0 and prev_plan == plan_date and prev_exec == exec_date:
+            conn.commit()
+            return {"ok": True, "skipped": True, "plan_date": plan_date, "exec_date": exec_date}
+
+        # Build targets from the same selection snapshot the UI uses.
+        sel = _build_selection_snapshot_payload(conn, settings, as_of_date=plan_date)
+        candidates = [c for c in (sel.get("candidates") or []) if isinstance(c, dict) and str(c.get("code") or "").strip()]
+        if AUTOTRADE_MAX_SELECTION_CODES > 0:
+            candidates = candidates[:AUTOTRADE_MAX_SELECTION_CODES]
+
+        history_anchor = sel.get("date") or plan_date
+        history = _build_selection_history(conn, settings, as_of_date=str(history_anchor), days=AUTOTRADE_EXIT_WINDOW_DAYS)
+        events = [e for e in (history.get("events") or []) if isinstance(e, dict)]
+
+        exited_rows: list[Dict[str, Any]] = []
+        seen_exits: set[str] = set()
+        for ev in events:
+            if str(ev.get("event_type") or "") != "exited":
+                continue
+            code = _normalize_code(ev.get("code"))
+            if not code or code in seen_exits:
+                continue
+            seen_exits.add(code)
+            exited_rows.append(
+                {
+                    "code": code,
+                    "name": str(ev.get("name") or "").strip(),
+                    "market": str(ev.get("market") or "").strip(),
+                    "date": str(ev.get("date") or "").strip(),
+                    "exit_reason": str(ev.get("exit_reason") or "").strip(),
+                }
+            )
+            if AUTOTRADE_MAX_EXIT_CODES > 0 and len(exited_rows) >= AUTOTRADE_MAX_EXIT_CODES:
+                break
+
+        cand_codes = {_normalize_code(c.get("code")) for c in candidates if isinstance(c, dict)}
+        exited_rows = [r for r in exited_rows if r.get("code") and r["code"] not in cand_codes]
+
+        db_path = str(DB_PATH.resolve())
+        desired_buy_codes: list[str] = []
+        desired_sell_codes: list[str] = []
+        plan_rows = 0
+        queue_rows = 0
+
+        def _exchange_quote(market: str) -> tuple[str, str]:
+            # Current viewer universe is KR only.
+            _m = str(market or "").upper()
+            if _m.startswith("NYSE"):
+                return "NYSE", "USD"
+            if _m.startswith("NASDAQ"):
+                return "NASDAQ", "USD"
+            return "KRX", "KRW"
+
+        # Candidates -> BUY pending
+        for row in candidates:
+            code = _normalize_code(row.get("code"))
+            if not code:
+                continue
+            name = str(row.get("name") or "").strip() or code
+            market = str(row.get("market") or "").strip() or "KR"
+            rec = _autotrade_recommend_code(code, db_path=db_path, optimize=AUTOTRADE_ENGINE_OPTIMIZE)
+            if not isinstance(rec, dict) or not rec.get("ok"):
+                continue
+            plan = rec.get("plan") if isinstance(rec.get("plan"), dict) else {}
+            entry = _safe_float(plan.get("entry_price"))
+            stop = _safe_float(plan.get("stop_price"))
+            target = _safe_float(plan.get("target_price"))
+            exchange, quote = _exchange_quote(market)
+            entry_q = _autotrade_round_limit_price(entry, quote=quote, side="buy") if entry is not None else None
+            stop_q = _autotrade_round_limit_price(stop, quote=quote, side="sell") if stop is not None else None
+            target_q = _autotrade_round_limit_price(target, quote=quote, side="sell") if target is not None else None
+
+            _autotrade_upsert_plan(
+                conn,
+                plan_date=str(plan_date),
+                exec_date=str(exec_date),
+                code=code,
+                name=name,
+                market=market,
+                rec=rec,
+                entry_price=entry_q,
+                stop_price=stop_q,
+                target_price=target_q,
+            )
+            plan_rows += 1
+
+            if entry_q is None:
+                continue
+
+            payload_no_pw = {
+                "exchange": exchange,
+                "base": code,
+                "quote": quote,
+                "side": "buy",
+                "type": "limit",
+                "amount": str(AUTOTRADE_QTY),
+                "price": _autotrade_format_price_str(entry_q, quote=quote),
+                "percent": "NaN",
+                "order_name": f"{name} 매매",
+                "kis_number": str(kis_number),
+            }
+
+            _autotrade_upsert_queue_order(
+                conn,
+                plan_date=str(plan_date),
+                exec_date=str(exec_date),
+                code=code,
+                name=name,
+                market=market,
+                side="buy",
+                order_type="limit",
+                qty=AUTOTRADE_QTY,
+                trigger_op="lte",
+                trigger_price=entry_q,
+                limit_price=entry_q,
+                exchange=exchange,
+                quote=quote,
+                percent="NaN",
+                order_name=f"{name} 매매",
+                webhook_url=webhook_url,
+                payload_json=json.dumps(payload_no_pw, ensure_ascii=False),
+                status="PENDING",
+            )
+            desired_buy_codes.append(code)
+            queue_rows += 1
+
+        # Exited -> SELL pending
+        for row in exited_rows:
+            code = _normalize_code(row.get("code"))
+            if not code:
+                continue
+            name = str(row.get("name") or "").strip() or code
+            market = str(row.get("market") or "").strip() or "KR"
+            rec = _autotrade_recommend_code(code, db_path=db_path, optimize=AUTOTRADE_ENGINE_OPTIMIZE)
+            if not isinstance(rec, dict) or not rec.get("ok"):
+                continue
+            plan = rec.get("plan") if isinstance(rec.get("plan"), dict) else {}
+            entry = _safe_float(plan.get("entry_price"))
+            stop = _safe_float(plan.get("stop_price"))
+            target = _safe_float(plan.get("target_price"))
+            exchange, quote = _exchange_quote(market)
+            entry_q = _autotrade_round_limit_price(entry, quote=quote, side="buy") if entry is not None else None
+            stop_q = _autotrade_round_limit_price(stop, quote=quote, side="sell") if stop is not None else None
+            target_q = _autotrade_round_limit_price(target, quote=quote, side="sell") if target is not None else None
+
+            _autotrade_upsert_plan(
+                conn,
+                plan_date=str(plan_date),
+                exec_date=str(exec_date),
+                code=code,
+                name=name,
+                market=market,
+                rec=rec,
+                entry_price=entry_q,
+                stop_price=stop_q,
+                target_price=target_q,
+            )
+            plan_rows += 1
+
+            sell_price = target_q if AUTOTRADE_SELL_PRICE_SOURCE != "stop" else stop_q
+            if sell_price is None:
+                continue
+            op = "gte" if AUTOTRADE_SELL_PRICE_SOURCE != "stop" else "lte"
+
+            payload_no_pw = {
+                "exchange": exchange,
+                "base": code,
+                "quote": quote,
+                "side": "sell",
+                "type": "limit",
+                "amount": str(AUTOTRADE_QTY),
+                "price": _autotrade_format_price_str(sell_price, quote=quote),
+                "percent": "NaN",
+                "order_name": f"{name} 매매",
+                "kis_number": str(kis_number),
+            }
+
+            _autotrade_upsert_queue_order(
+                conn,
+                plan_date=str(plan_date),
+                exec_date=str(exec_date),
+                code=code,
+                name=name,
+                market=market,
+                side="sell",
+                order_type="limit",
+                qty=AUTOTRADE_QTY,
+                trigger_op=op,
+                trigger_price=sell_price,
+                limit_price=sell_price,
+                exchange=exchange,
+                quote=quote,
+                percent="NaN",
+                order_name=f"{name} 매매",
+                webhook_url=webhook_url,
+                payload_json=json.dumps(payload_no_pw, ensure_ascii=False),
+                status="PENDING",
+            )
+            desired_sell_codes.append(code)
+            queue_rows += 1
+
+        _autotrade_cancel_missing(
+            conn,
+            exec_date=str(exec_date),
+            desired_buy_codes=list(dict.fromkeys(desired_buy_codes)),
+            desired_sell_codes=list(dict.fromkeys(desired_sell_codes)),
+        )
+
+        conn.commit()
+        _autotrade_state.update({"last_plan_date": plan_date, "last_exec_date": exec_date, "last_rebuild_ts": time.time()})
+
+        return {
+            "ok": True,
+            "plan_date": plan_date,
+            "exec_date": exec_date,
+            "counts": {
+                "candidates": len(candidates),
+                "exited": len(exited_rows),
+                "plans_upserted": plan_rows,
+                "queue_upserted": queue_rows,
+                "buy_pending": len(set(desired_buy_codes)),
+                "sell_pending": len(set(desired_sell_codes)),
+            },
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _autotrade_should_trigger(order: sqlite3.Row, price: Optional[float]) -> bool:
+    if price is None:
+        return False
+    op = str(order["trigger_op"] or "").lower()
+    thr = _safe_float(order["trigger_price"])
+    if op == "always":
+        return True
+    if thr is None:
+        return False
+    if op == "gte":
+        return float(price) >= float(thr)
+    # default: lte
+    return float(price) <= float(thr)
+
+
+def _autotrade_live_price(conn: sqlite3.Connection, settings: Dict[str, Any], code: str) -> Tuple[Optional[float], str]:
+    code = _normalize_code(code)
+    if not code:
+        return None, "none"
+
+    # 1) WS cache (if running)
+    with _candidate_ws_lock:
+        cached = _candidate_ws_prices.get(code)
+    if isinstance(cached, dict):
+        p = _safe_float(cached.get("price"))
+        ts = float(cached.get("updated_at") or 0.0)
+        if p is not None and p > 0 and (time.time() - ts) < 10:
+            return p, "ws"
+
+    # 2) KIS REST
+    client = _get_kis_price_client(settings)
+    if client is not None:
+        try:
+            p = _safe_float(client.get_current_price(code))
+            if p is not None and p > 0:
+                return p, "kis"
+        except Exception:
+            pass
+
+    # 3) DB close fallback
+    try:
+        row = conn.execute(
+            "SELECT close FROM daily_price WHERE code=? ORDER BY date DESC LIMIT 1",
+            (code,),
+        ).fetchone()
+        if row and row[0] is not None:
+            p = _safe_float(row[0])
+            if p is not None and p > 0:
+                return p, "db"
+    except Exception:
+        pass
+    return None, "none"
+
+
+def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = _autotrade_webhook_config()
+    webhook_url = cfg.get("url") or ""
+    webhook_password = cfg.get("password") or ""
+    kis_number = cfg.get("kis_number") or "2"
+    if not webhook_url or not webhook_password:
+        return {"ok": False, "error": "missing_webhook_config"}
+
+    today = _autotrade_today(settings)
+    now = _autotrade_now_utc_iso()
+
+    conn = get_conn()
+    try:
+        orders = conn.execute(
+            """
+            SELECT *
+            FROM autotrade_webhook_queue
+            WHERE exec_date=?
+              AND status IN ('PENDING','FAILED')
+            ORDER BY id ASC
+            """,
+            (str(today),),
+        ).fetchall()
+        if not orders:
+            return {"ok": True, "sent": 0, "pending": 0}
+
+        # Price cache per tick (avoid duplicate REST calls)
+        price_map: Dict[str, Tuple[Optional[float], str]] = {}
+        for o in orders:
+            code = str(o["code"] or "")
+            if code and code not in price_map:
+                price_map[code] = _autotrade_live_price(conn, settings, code)
+
+        sent = 0
+        attempted = 0  # includes dry-run "would send" and real HTTP attempts
+        checked = 0
+        for o in orders:
+            if attempted >= AUTOTRADE_MAX_SEND_PER_TICK:
+                break
+            checked += 1
+            code = str(o["code"] or "")
+            price, price_source = price_map.get(code) or (None, "none")
+            if price_source == "db" and not AUTOTRADE_ALLOW_DB_PRICE:
+                # Prevent accidental trading with stale daily close when KIS/WS is unavailable.
+                continue
+            if not _autotrade_should_trigger(o, price):
+                continue
+
+            side = str(o["side"] or "")
+            order_type = str(o["order_type"] or "")
+            qty = int(o["qty"] or 1)
+            exchange = str(o["exchange"] or "")
+            quote = str(o["quote"] or "")
+            limit_price = _safe_float(o["limit_price"])
+            percent = str(o["percent"] or "NaN")
+            order_name = str(o["order_name"] or "")
+            url = str(o["webhook_url"] or webhook_url).strip() or webhook_url
+
+            payload = {
+                "password": webhook_password,
+                "exchange": exchange,
+                "base": code,
+                "quote": quote,
+                "side": side,
+                "type": order_type,
+                "amount": str(qty),
+                "price": _autotrade_format_price_str(limit_price, quote=quote) if limit_price is not None else "",
+                "percent": percent,
+                "order_name": order_name,
+                "kis_number": str(kis_number),
+            }
+
+            if AUTOTRADE_DRY_RUN:
+                conn.execute(
+                    """
+                    UPDATE autotrade_webhook_queue
+                    SET updated_at=?,
+                        last_price=?,
+                        last_response_code=?,
+                        last_response_body=?,
+                        last_error=NULL
+                    WHERE id=?
+                    """,
+                    (now, _safe_float(price), 0, f"dry_run would_send price_source={price_source}", int(o["id"])),
+                )
+                attempted += 1
+                continue
+
+            ok = True
+            resp_code = None
+            resp_body = ""
+            err = ""
+            try:
+                resp = requests.post(url, json=payload, timeout=AUTOTRADE_WEBHOOK_TIMEOUT_SEC)
+                resp_code = int(resp.status_code)
+                resp_body = _autotrade_trim_text(resp.text, max_len=1200)
+                ok = 200 <= resp.status_code < 300
+                if not ok:
+                    err = f"http_{resp.status_code}"
+            except Exception as exc:
+                ok = False
+                err = str(exc).strip()
+
+            attempted += 1
+
+            if ok:
+                conn.execute(
+                    """
+                    UPDATE autotrade_webhook_queue
+                    SET status='SENT',
+                        sent_at=?,
+                        updated_at=?,
+                        last_price=?,
+                        last_response_code=?,
+                        last_response_body=?,
+                        last_error=NULL
+                    WHERE id=?
+                    """,
+                    (now, now, _safe_float(price), resp_code, resp_body, int(o["id"])),
+                )
+                sent += 1
+            else:
+                conn.execute(
+                    """
+                    UPDATE autotrade_webhook_queue
+                    SET status='FAILED',
+                        attempts=attempts+1,
+                        updated_at=?,
+                        last_price=?,
+                        last_response_code=?,
+                        last_response_body=?,
+                        last_error=?
+                    WHERE id=?
+                    """,
+                    (now, _safe_float(price), resp_code, resp_body, _autotrade_trim_text(err, max_len=400), int(o["id"])),
+                )
+
+        conn.commit()
+        return {"ok": True, "sent": sent, "attempted": attempted, "checked": checked, "pending": len(orders) - sent}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _autotrade_planner_loop() -> None:
+    while True:
+        try:
+            settings = load_settings()
+            result = _autotrade_rebuild_queue(settings)
+            _autotrade_health["planner_last_ok_ts"] = time.time()
+            _autotrade_health["planner_last_error"] = None
+            if isinstance(result, dict) and not result.get("ok"):
+                logging.info("autotrade planner: %s", result)
+        except Exception as exc:
+            _autotrade_health["planner_last_error"] = str(exc)
+            _autotrade_health["planner_last_error_ts"] = time.time()
+            logging.warning("autotrade planner error: %s", exc)
+        time.sleep(AUTOTRADE_PLANNER_INTERVAL_SEC)
+
+
+def _autotrade_dispatch_loop() -> None:
+    while True:
+        try:
+            settings = load_settings()
+            result = _autotrade_dispatch_tick(settings)
+            _autotrade_health["dispatch_last_ok_ts"] = time.time()
+            _autotrade_health["dispatch_last_error"] = None
+            _autotrade_state["last_dispatch_ts"] = time.time()
+            if isinstance(result, dict) and result.get("sent"):
+                logging.info("autotrade dispatch sent=%s checked=%s", result.get("sent"), result.get("checked"))
+        except Exception as exc:
+            _autotrade_health["dispatch_last_error"] = str(exc)
+            _autotrade_health["dispatch_last_error_ts"] = time.time()
+            logging.warning("autotrade dispatch error: %s", exc)
+        time.sleep(AUTOTRADE_DISPATCH_INTERVAL_SEC)
 
 def _set_candidate_ws_targets(codes: list[str]) -> None:
     codes = [_normalize_code(c) for c in (codes or []) if str(c or "").strip()]
@@ -1521,10 +2413,26 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 def _start_background_tasks() -> None:
-    if SELECTION_NOTIFY_INTERVAL_SEC <= 0:
+    if SELECTION_NOTIFY_INTERVAL_SEC > 0:
+        thread = threading.Thread(target=_selection_notify_loop, daemon=True)
+        thread.start()
+
+    if not AUTOTRADE_ENABLED:
         return
-    thread = threading.Thread(target=_selection_notify_loop, daemon=True)
-    thread.start()
+
+    cfg = _autotrade_webhook_config()
+    if not cfg.get("url") or not cfg.get("password"):
+        logging.warning("autotrade enabled but webhook config missing; threads not started")
+        return
+
+    global _autotrade_planner_thread, _autotrade_dispatch_thread
+    with _autotrade_thread_lock:
+        if _autotrade_planner_thread is None or not _autotrade_planner_thread.is_alive():
+            _autotrade_planner_thread = threading.Thread(target=_autotrade_planner_loop, daemon=True)
+            _autotrade_planner_thread.start()
+        if _autotrade_dispatch_thread is None or not _autotrade_dispatch_thread.is_alive():
+            _autotrade_dispatch_thread = threading.Thread(target=_autotrade_dispatch_loop, daemon=True)
+            _autotrade_dispatch_thread.start()
 
 
 _start_background_tasks()
@@ -2003,7 +2911,202 @@ def selection_filters_toggle():
     toggles[key] = enabled
     _save_filter_toggles(toggles)
     _selection_cache["ts"] = 0
+    # If autotrade is enabled, force a queue rebuild on the next planner tick.
+    if AUTOTRADE_ENABLED:
+        _autotrade_state["last_plan_date"] = None
+        _autotrade_state["last_exec_date"] = None
+        _autotrade_state["last_rebuild_ts"] = 0.0
     return jsonify(toggles)
+
+
+@app.get("/autotrade/status")
+def autotrade_status():
+    guard = _require_admin_query_password()
+    if guard is not None:
+        return guard
+    settings = load_settings()
+    tz_name = _viewer_tz(settings)
+    today = _autotrade_today(settings)
+    cfg = _autotrade_webhook_config()
+
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT MAX(date) FROM daily_price").fetchone()
+        plan_date = str(row[0]) if row and row[0] else None
+        exec_date = _autotrade_next_weekday(plan_date, tz_name=tz_name) if plan_date else None
+        pending_cnt = int(conn.execute(
+            "SELECT COUNT(*) FROM autotrade_webhook_queue WHERE exec_date=? AND status='PENDING'",
+            (today,),
+        ).fetchone()[0] or 0)
+        failed_cnt = int(conn.execute(
+            "SELECT COUNT(*) FROM autotrade_webhook_queue WHERE exec_date=? AND status='FAILED'",
+            (today,),
+        ).fetchone()[0] or 0)
+        sent_cnt = int(conn.execute(
+            "SELECT COUNT(*) FROM autotrade_webhook_queue WHERE exec_date=? AND status='SENT'",
+            (today,),
+        ).fetchone()[0] or 0)
+        cancelled_cnt = int(conn.execute(
+            "SELECT COUNT(*) FROM autotrade_webhook_queue WHERE exec_date=? AND status='CANCELLED'",
+            (today,),
+        ).fetchone()[0] or 0)
+        expired_cnt = int(conn.execute(
+            "SELECT COUNT(*) FROM autotrade_webhook_queue WHERE exec_date=? AND status='EXPIRED'",
+            (today,),
+        ).fetchone()[0] or 0)
+    except Exception:
+        plan_date = None
+        exec_date = None
+        pending_cnt = failed_cnt = sent_cnt = cancelled_cnt = expired_cnt = 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return jsonify(
+        {
+            "enabled": bool(AUTOTRADE_ENABLED),
+            "dry_run": bool(AUTOTRADE_DRY_RUN),
+            "planner_interval_sec": AUTOTRADE_PLANNER_INTERVAL_SEC,
+            "dispatch_interval_sec": AUTOTRADE_DISPATCH_INTERVAL_SEC,
+            "sell_price_source": AUTOTRADE_SELL_PRICE_SOURCE,
+            "exit_window_days": AUTOTRADE_EXIT_WINDOW_DAYS,
+            "max_exit_codes": AUTOTRADE_MAX_EXIT_CODES,
+            "max_selection_codes": AUTOTRADE_MAX_SELECTION_CODES,
+            "webhook": {"url": cfg.get("url") or "", "kis_number": cfg.get("kis_number") or ""},
+            "today": today,
+            "plan_date": plan_date,
+            "exec_date": exec_date,
+            "health": dict(_autotrade_health),
+            "state": dict(_autotrade_state),
+            "queue_today": {
+                "pending": pending_cnt,
+                "failed": failed_cnt,
+                "sent": sent_cnt,
+                "cancelled": cancelled_cnt,
+                "expired": expired_cnt,
+            },
+        }
+    )
+
+
+@app.get("/autotrade/queue")
+def autotrade_queue():
+    guard = _require_admin_query_password()
+    if guard is not None:
+        return guard
+    settings = load_settings()
+    today = _autotrade_today(settings)
+    exec_date = str(request.args.get("exec_date") or today).strip() or today
+    limit = int(request.args.get("limit", 200))
+    limit = max(1, min(limit, 2000))
+
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+              id, plan_date, exec_date, code, name, market, side, order_type, qty,
+              trigger_op, trigger_price, limit_price, exchange, quote, percent, order_name,
+              webhook_url, status, attempts, last_error, last_price, last_response_code, last_response_body,
+              created_at, sent_at, updated_at
+            FROM autotrade_webhook_queue
+            WHERE exec_date=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(exec_date, limit),
+        )
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.astype(object).where(pd.notnull(df), None)
+        return jsonify(df.to_dict(orient="records"))
+    except Exception:
+        return jsonify([])
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/autotrade/recommend")
+def autotrade_recommend():
+    guard = _require_admin_query_password()
+    if guard is not None:
+        return guard
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "missing_code"}), 400
+    code = _normalize_code(code)
+    if not code:
+        return jsonify({"error": "invalid_code"}), 400
+
+    settings = load_settings()
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT name, market FROM universe_members WHERE code=? LIMIT 1", (code,)).fetchone()
+        name = str(row[0]) if row and row[0] else code
+        market = str(row[1]) if row and row[1] else "KR"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    exchange = "KRX"
+    quote = "KRW"
+    if str(market).upper().startswith("NYSE"):
+        exchange, quote = "NYSE", "USD"
+    elif str(market).upper().startswith("NASDAQ"):
+        exchange, quote = "NASDAQ", "USD"
+
+    rec = _autotrade_recommend_code(code, db_path=str(DB_PATH.resolve()), optimize=AUTOTRADE_ENGINE_OPTIMIZE)
+    plan = rec.get("plan") if isinstance(rec, dict) else {}
+    entry = _safe_float(plan.get("entry_price") if isinstance(plan, dict) else None)
+    stop = _safe_float(plan.get("stop_price") if isinstance(plan, dict) else None)
+    target = _safe_float(plan.get("target_price") if isinstance(plan, dict) else None)
+    entry_q = _autotrade_round_limit_price(entry, quote=quote, side="buy") if entry is not None else None
+    stop_q = _autotrade_round_limit_price(stop, quote=quote, side="sell") if stop is not None else None
+    target_q = _autotrade_round_limit_price(target, quote=quote, side="sell") if target is not None else None
+
+    return jsonify(
+        _json_sanitize(
+            {
+                "code": code,
+                "name": name,
+                "market": market,
+                "exchange": exchange,
+                "quote": quote,
+                "recommendation": rec,
+                "quantized": {
+                    "entry_price": entry_q,
+                    "stop_price": stop_q,
+                    "target_price": target_q,
+                },
+            }
+        )
+    )
+
+
+@app.post("/autotrade/rebuild")
+def autotrade_rebuild():
+    payload = request.get_json(silent=True) or {}
+    if not KIS_TOGGLE_PASSWORD:
+        return jsonify({"error": "toggle_disabled"}), 403
+    if not _verify_toggle_password(payload):
+        return jsonify({"error": "invalid_password"}), 403
+    try:
+        # Force rebuild regardless of cached state.
+        _autotrade_state["last_plan_date"] = None
+        _autotrade_state["last_exec_date"] = None
+        _autotrade_state["last_rebuild_ts"] = 0.0
+        settings = load_settings()
+        res = _autotrade_rebuild_queue(settings)
+        return jsonify(res)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any]) -> Dict[str, Any]:

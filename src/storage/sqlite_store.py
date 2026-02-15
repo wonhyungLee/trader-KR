@@ -190,6 +190,58 @@ SCHEMA = {
             removed_codes_json TEXT
         );
     """,
+    # ---------- autotrade (webhook-based) ----------
+    "autotrade_engine_plan": """
+        CREATE TABLE IF NOT EXISTS autotrade_engine_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_date TEXT NOT NULL,
+            exec_date TEXT,
+            code TEXT NOT NULL,
+            name TEXT,
+            market TEXT,
+            engine_status TEXT,
+            confidence REAL,
+            entry_price REAL,
+            stop_price REAL,
+            target_price REAL,
+            engine_payload_json TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(plan_date, code)
+        );
+    """,
+    "autotrade_webhook_queue": """
+        CREATE TABLE IF NOT EXISTS autotrade_webhook_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_date TEXT,
+            exec_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT,
+            market TEXT,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            qty INTEGER NOT NULL,
+            trigger_op TEXT NOT NULL,
+            trigger_price REAL,
+            limit_price REAL,
+            exchange TEXT,
+            quote TEXT,
+            percent TEXT,
+            order_name TEXT,
+            webhook_url TEXT,
+            payload_json TEXT,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            last_price REAL,
+            last_response_code INTEGER,
+            last_response_body TEXT,
+            created_at TEXT,
+            sent_at TEXT,
+            updated_at TEXT,
+            UNIQUE(exec_date, code, side)
+        );
+    """,
 }
 
 INDEXES = [
@@ -208,6 +260,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_sector_map_sector ON sector_map(sector_name);",
     "CREATE INDEX IF NOT EXISTS idx_sector_map_updated ON sector_map(updated_at);",
     "CREATE INDEX IF NOT EXISTS idx_universe_changes_date ON universe_changes(snapshot_date);",
+    "CREATE INDEX IF NOT EXISTS idx_autotrade_plan_date ON autotrade_engine_plan(plan_date);",
+    "CREATE INDEX IF NOT EXISTS idx_autotrade_plan_exec_date ON autotrade_engine_plan(exec_date);",
+    "CREATE INDEX IF NOT EXISTS idx_autotrade_queue_exec_status ON autotrade_webhook_queue(exec_date, status);",
+    "CREATE INDEX IF NOT EXISTS idx_autotrade_queue_status ON autotrade_webhook_queue(status);",
 ]
 
 
