@@ -982,6 +982,14 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
             """,
             (now, str(today)),
         )
+        conn.execute(
+            """
+            DELETE FROM autotrade_webhook_queue
+            WHERE status='EXPIRED'
+              AND exec_date < ?
+            """,
+            (str(today),),
+        )
 
         # Skip expensive rebuild if nothing fundamental changed.
         prev_plan = _autotrade_state.get("last_plan_date")
@@ -1113,80 +1121,8 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
             desired_buy_codes.append(code)
             queue_rows += 1
 
-        # Exited -> SELL pending
-        for row in exited_rows:
-            code = _normalize_code(row.get("code"))
-            if not code:
-                continue
-            name = str(row.get("name") or "").strip() or code
-            market = str(row.get("market") or "").strip() or "KR"
-            rec = _autotrade_recommend_code(code, db_path=db_path, optimize=AUTOTRADE_ENGINE_OPTIMIZE)
-            if not isinstance(rec, dict) or not rec.get("ok"):
-                continue
-            plan = rec.get("plan") if isinstance(rec.get("plan"), dict) else {}
-            entry = _safe_float(plan.get("entry_price"))
-            stop = _safe_float(plan.get("stop_price"))
-            target = _safe_float(plan.get("target_price"))
-            exchange, quote = _exchange_quote(market)
-            entry_q = _autotrade_round_limit_price(entry, quote=quote, side="buy") if entry is not None else None
-            stop_q = _autotrade_round_limit_price(stop, quote=quote, side="sell") if stop is not None else None
-            target_q = _autotrade_round_limit_price(target, quote=quote, side="sell") if target is not None else None
-
-            _autotrade_upsert_plan(
-                conn,
-                plan_date=str(plan_date),
-                exec_date=str(exec_date),
-                code=code,
-                name=name,
-                market=market,
-                rec=rec,
-                entry_price=entry_q,
-                stop_price=stop_q,
-                target_price=target_q,
-            )
-            plan_rows += 1
-
-            sell_price = target_q if AUTOTRADE_SELL_PRICE_SOURCE != "stop" else stop_q
-            if sell_price is None:
-                continue
-            op = "gte" if AUTOTRADE_SELL_PRICE_SOURCE != "stop" else "lte"
-
-            payload_no_pw = {
-                "exchange": exchange,
-                "base": code,
-                "quote": quote,
-                "side": "sell",
-                "type": "limit",
-                "amount": str(AUTOTRADE_QTY),
-                "price": _autotrade_format_price_str(sell_price, quote=quote),
-                "percent": "NaN",
-                "order_name": f"{name} 매매",
-                "kis_number": str(kis_number),
-            }
-
-            _autotrade_upsert_queue_order(
-                conn,
-                plan_date=str(plan_date),
-                exec_date=str(exec_date),
-                code=code,
-                name=name,
-                market=market,
-                side="sell",
-                order_type="limit",
-                qty=AUTOTRADE_QTY,
-                trigger_op=op,
-                trigger_price=sell_price,
-                limit_price=sell_price,
-                exchange=exchange,
-                quote=quote,
-                percent="NaN",
-                order_name=f"{name} 매매",
-                webhook_url=webhook_url,
-                payload_json=json.dumps(payload_no_pw, ensure_ascii=False),
-                status="PENDING",
-            )
-            desired_sell_codes.append(code)
-            queue_rows += 1
+        # Exit-based SELL automation is intentionally disabled.
+        # Keep desired_sell_codes empty so stale pending SELL orders are cancelled below.
 
         _autotrade_cancel_missing(
             conn,
