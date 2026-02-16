@@ -1226,7 +1226,7 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
             SELECT *
             FROM autotrade_webhook_queue
             WHERE exec_date=?
-              AND status IN ('PENDING','FAILED')
+              AND status='PENDING'
             ORDER BY id ASC
             """,
             (str(today),),
@@ -1234,27 +1234,14 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
         if not orders:
             return {"ok": True, "sent": 0, "pending": 0}
 
-        # Price cache per tick (avoid duplicate REST calls)
-        price_map: Dict[str, Tuple[Optional[float], str]] = {}
-        for o in orders:
-            code = str(o["code"] or "")
-            if code and code not in price_map:
-                price_map[code] = _autotrade_live_price(conn, settings, code)
-
         sent = 0
-        attempted = 0  # includes dry-run "would send" and real HTTP attempts
+        attempted = 0
         checked = 0
         for o in orders:
             if attempted >= AUTOTRADE_MAX_SEND_PER_TICK:
                 break
             checked += 1
             code = str(o["code"] or "")
-            price, price_source = price_map.get(code) or (None, "none")
-            if price_source == "db" and not AUTOTRADE_ALLOW_DB_PRICE:
-                # Prevent accidental trading with stale daily close when KIS/WS is unavailable.
-                continue
-            if not _autotrade_should_trigger(o, price):
-                continue
 
             side = str(o["side"] or "")
             order_type = str(o["order_type"] or "")
@@ -1284,19 +1271,20 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
                 conn.execute(
                     """
                     UPDATE autotrade_webhook_queue
-                    SET updated_at=?,
-                        last_price=?,
+                    SET status='SENT',
+                        sent_at=?,
+                        updated_at=?,
                         last_response_code=?,
                         last_response_body=?,
                         last_error=NULL
                     WHERE id=?
                     """,
-                    (now, _safe_float(price), 0, f"dry_run would_send price_source={price_source}", int(o["id"])),
+                    (now, now, 0, "dry_run sent_once", int(o["id"])),
                 )
                 attempted += 1
+                sent += 1
                 continue
 
-            ok = True
             resp_code = None
             resp_body = ""
             err = ""
@@ -1304,49 +1292,39 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
                 resp = requests.post(url, json=payload, timeout=AUTOTRADE_WEBHOOK_TIMEOUT_SEC)
                 resp_code = int(resp.status_code)
                 resp_body = _autotrade_trim_text(resp.text, max_len=1200)
-                ok = 200 <= resp.status_code < 300
-                if not ok:
-                    err = f"http_{resp.status_code}"
+                if not (200 <= resp.status_code < 300):
+                    # Fire-and-forget: non-2xx 도 실패로 재시도하지 않고 기록만 남긴다.
+                    err = f"ignored_http_{resp.status_code}"
             except Exception as exc:
-                ok = False
+                # Fire-and-forget: 전송 예외도 기록만 남기고 재시도하지 않는다.
                 err = str(exc).strip()
 
             attempted += 1
-
-            if ok:
-                conn.execute(
-                    """
-                    UPDATE autotrade_webhook_queue
-                    SET status='SENT',
-                        sent_at=?,
-                        updated_at=?,
-                        last_price=?,
-                        last_response_code=?,
-                        last_response_body=?,
-                        last_error=NULL
-                    WHERE id=?
-                    """,
-                    (now, now, _safe_float(price), resp_code, resp_body, int(o["id"])),
-                )
-                sent += 1
-            else:
-                conn.execute(
-                    """
-                    UPDATE autotrade_webhook_queue
-                    SET status='FAILED',
-                        attempts=attempts+1,
-                        updated_at=?,
-                        last_price=?,
-                        last_response_code=?,
-                        last_response_body=?,
-                        last_error=?
-                    WHERE id=?
-                    """,
-                    (now, _safe_float(price), resp_code, resp_body, _autotrade_trim_text(err, max_len=400), int(o["id"])),
-                )
+            conn.execute(
+                """
+                UPDATE autotrade_webhook_queue
+                SET status='SENT',
+                    attempts=attempts+1,
+                    sent_at=?,
+                    updated_at=?,
+                    last_response_code=?,
+                    last_response_body=?,
+                    last_error=?
+                WHERE id=?
+                """,
+                (
+                    now,
+                    now,
+                    resp_code,
+                    resp_body,
+                    _autotrade_trim_text(err, max_len=400) if err else None,
+                    int(o["id"]),
+                ),
+            )
+            sent += 1
 
         conn.commit()
-        return {"ok": True, "sent": sent, "attempted": attempted, "checked": checked, "pending": len(orders) - sent}
+        return {"ok": True, "sent": sent, "attempted": attempted, "checked": checked, "pending": max(0, len(orders) - attempted)}
     finally:
         try:
             conn.close()
