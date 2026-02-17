@@ -133,7 +133,8 @@ WantedBy=multi-user.target
 
 ## 11. 동작 확인 체크리스트
 - `python -m src.collectors.daily_loader --limit 3` 로 소량 증분 테스트
-- `python -m src.analyzer.backtest_runner` 실행 후 `data/equity_curve.csv` 생성 확인
+- `python -m src.analyzer.backtest_runner_active_universe` 실행 후
+  `data/backtest_active_universe_daytrade/equity_curve.csv` 생성 확인
 - 디스코드/텔레그램 알림 설정 시 메시지 수신 여부 확인
 
 ## 12. 보안 메모
@@ -160,4 +161,6 @@ date,code,open,high,low,close,volume,amount
 - `amount` 단위는 원. 없으면 `close*volume`로 계산 가능.
 - `ma25`, `disparity` 컬럼이 없으면 스크립트가 다시 계산합니다.
 
-위 두 CSV를 제공해 주시면 `python src/analyzer/backtest_runner.py`로 즉시 백테스트를 돌릴 수 있습니다. 필요한 추가 형식이 있으면 알려주세요.
+위 두 CSV를 제공해 주시면
+`python -m src.analyzer.backtest_runner_active_universe`로 즉시 daytrade 백테스트를 돌릴 수 있습니다.
+레거시 호환용으로 `python -m src.analyzer.backtest_runner`도 동일한 daytrade 러너를 호출합니다.

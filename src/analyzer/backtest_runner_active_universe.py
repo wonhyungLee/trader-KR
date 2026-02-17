@@ -14,6 +14,7 @@ Outputs:
 - output_dir/trade_log.csv
 - output_dir/equity_curve.csv
 - output_dir/annual_metrics.csv
+- data/backtest_annual_validation.csv (legacy alias of annual_metrics.csv)
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.analyzer.backtest_runner import StrategyParams, load_strategy
+from src.analyzer.strategy_loader import StrategyParams, load_strategy
 from src.storage.sqlite_store import SQLiteStore
 from src.utils.config import load_settings
 from src.utils.project_root import ensure_repo_root
@@ -39,6 +40,7 @@ from stock_daytrade_engine.indicators import atr_sma
 
 FILTER_TOGGLE_KEYS = ("min_amount", "liquidity", "disparity")
 FILTER_TOGGLE_PATH = Path("data/selection_filter_toggles.json")
+LEGACY_ANNUAL_OUTPUT = Path("data/backtest_annual_validation.csv")
 
 
 @dataclass
@@ -685,6 +687,9 @@ def run_backtest_active_universe(
         initial_cash=float(getattr(params, "initial_cash", 10_000_000) or 10_000_000),
     )
     annual.to_csv(output_dir / "annual_metrics.csv", index=False)
+    # Keep legacy filename in sync to avoid mixing old/non-daytrade reports.
+    LEGACY_ANNUAL_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    annual.to_csv(LEGACY_ANNUAL_OUTPUT, index=False)
 
     print(
         f"saved output_dir={output_dir} "

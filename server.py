@@ -28,7 +28,7 @@ from flask_cors import CORS
 from stock_daytrade_engine.config import EngineConfig
 from stock_daytrade_engine.recommender import recommend_code
 
-from src.analyzer.backtest_runner import load_strategy
+from src.analyzer.strategy_loader import load_strategy
 from src.collectors.kis_price_client import KISPriceClient
 from src.storage.sqlite_store import SQLiteStore
 from src.utils.config import (
@@ -101,7 +101,7 @@ AUTOTRADE_DRY_RUN = _env_flag("AUTOTRADE_DRY_RUN", True)
 AUTOTRADE_INFO_PATH = Path(os.getenv("AUTOTRADE_INFO_PATH", "../자동매매정보2.txt"))
 AUTOTRADE_WEBHOOK_URL = str(os.getenv("AUTOTRADE_WEBHOOK_URL", "") or "").strip()
 AUTOTRADE_WEBHOOK_PASSWORD = str(os.getenv("AUTOTRADE_WEBHOOK_PASSWORD", "") or "").strip()
-AUTOTRADE_KIS_NUMBER = str(os.getenv("AUTOTRADE_KIS_NUMBER", "2") or "2").strip() or "2"
+AUTOTRADE_KIS_NUMBER = str(os.getenv("AUTOTRADE_KIS_NUMBER", "1") or "1").strip() or "1"
 AUTOTRADE_QTY = max(1, int(os.getenv("AUTOTRADE_QTY", "1") or 1))
 AUTOTRADE_PLANNER_INTERVAL_SEC = max(30, int(os.getenv("AUTOTRADE_PLANNER_INTERVAL_SEC", "300") or 300))
 AUTOTRADE_DISPATCH_INTERVAL_SEC = max(5, int(os.getenv("AUTOTRADE_DISPATCH_INTERVAL_SEC", "60") or 60))
@@ -670,7 +670,7 @@ def _autotrade_webhook_config() -> Dict[str, str]:
     return {
         "url": str(url or "").strip(),
         "password": str(password or "").strip(),
-        "kis_number": str(kis_number or "2").strip() or "2",
+        "kis_number": str(kis_number or "1").strip() or "1",
     }
 
 
@@ -1166,7 +1166,7 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _autotrade_webhook_config()
     webhook_url = cfg.get("url") or ""
     webhook_password = cfg.get("password") or ""
-    kis_number = cfg.get("kis_number") or "2"
+    kis_number = cfg.get("kis_number") or "1"
     if not webhook_url or not webhook_password:
         raise RuntimeError("missing autotrade webhook url/password (set env or 자동매매정보2.txt)")
 
@@ -1424,7 +1424,7 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _autotrade_webhook_config()
     webhook_url = cfg.get("url") or ""
     webhook_password = cfg.get("password") or ""
-    kis_number = cfg.get("kis_number") or "2"
+    kis_number = cfg.get("kis_number") or "1"
     if not webhook_url or not webhook_password:
         return {"ok": False, "error": "missing_webhook_config"}
 
