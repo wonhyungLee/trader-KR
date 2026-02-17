@@ -242,7 +242,28 @@ SCHEMA = {
             UNIQUE(exec_date, code, side)
         );
     """,
+"autotrade_kv": """
+    CREATE TABLE IF NOT EXISTS autotrade_kv (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT
+    );
+""",
+"autotrade_active_universe": """
+    CREATE TABLE IF NOT EXISTS autotrade_active_universe (
+        code TEXT PRIMARY KEY,
+        name TEXT,
+        market TEXT,
+        status TEXT NOT NULL,               -- ACTIVE | REMOVED
+        added_date TEXT,
+        removed_date TEXT,
+        removed_reason TEXT,
+        last_seen_date TEXT,
+        updated_at TEXT
+    );
+""",
 }
+
 
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_daily_price_code_date ON daily_price(code, date);",
@@ -264,6 +285,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_autotrade_plan_exec_date ON autotrade_engine_plan(exec_date);",
     "CREATE INDEX IF NOT EXISTS idx_autotrade_queue_exec_status ON autotrade_webhook_queue(exec_date, status);",
     "CREATE INDEX IF NOT EXISTS idx_autotrade_queue_status ON autotrade_webhook_queue(status);",
+"CREATE INDEX IF NOT EXISTS idx_autotrade_active_status ON autotrade_active_universe(status);",
+"CREATE INDEX IF NOT EXISTS idx_autotrade_active_last_seen ON autotrade_active_universe(last_seen_date);",
 ]
 
 

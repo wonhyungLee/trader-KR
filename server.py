@@ -946,6 +946,222 @@ def _autotrade_cancel_missing(
     _cancel_side("sell", desired_sell_codes)
 
 
+# --- Autotrade active universe ("exclude only on MA25 trend-break") ---
+
+def _autotrade_kv_get(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
+    try:
+        row = conn.execute("SELECT value FROM autotrade_kv WHERE key=? LIMIT 1", (str(key),)).fetchone()
+        if row and row[0] is not None:
+            return str(row[0])
+    except Exception:
+        pass
+    return default
+
+def _autotrade_kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    now = _autotrade_now_utc_iso()
+    conn.execute(
+        """
+        INSERT INTO autotrade_kv(key, value, updated_at)
+        VALUES(?,?,?)
+        ON CONFLICT(key) DO UPDATE SET
+          value=excluded.value,
+          updated_at=excluded.updated_at
+        """,
+        (str(key), str(value), now),
+    )
+
+def _autotrade_active_fetch(conn: sqlite3.Connection) -> list[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT code, name, market, status, last_seen_date
+        FROM autotrade_active_universe
+        WHERE status='ACTIVE'
+        ORDER BY last_seen_date DESC, code ASC
+        """
+    ).fetchall()
+    out: list[Dict[str, Any]] = []
+    for r in rows or []:
+        out.append(
+            {
+                "code": str(r["code"] or "").strip(),
+                "name": str(r["name"] or "").strip(),
+                "market": str(r["market"] or "").strip(),
+                "last_seen_date": str(r["last_seen_date"] or "").strip(),
+            }
+        )
+    return out
+
+def _autotrade_active_upsert(conn: sqlite3.Connection, *, code: str, name: str, market: str, seen_date: str) -> None:
+    now = _autotrade_now_utc_iso()
+    conn.execute(
+        """
+        INSERT INTO autotrade_active_universe(
+            code, name, market, status,
+            added_date, removed_date, removed_reason,
+            last_seen_date, updated_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(code) DO UPDATE SET
+            name=excluded.name,
+            market=excluded.market,
+            status='ACTIVE',
+            removed_date=NULL,
+            removed_reason=NULL,
+            last_seen_date=excluded.last_seen_date,
+            updated_at=excluded.updated_at
+        """,
+        (str(code), str(name or ""), str(market or ""), "ACTIVE", str(seen_date), None, None, str(seen_date), now),
+    )
+
+def _autotrade_active_mark_removed(conn: sqlite3.Connection, *, code: str, removed_date: str, reason: str) -> None:
+    now = _autotrade_now_utc_iso()
+    conn.execute(
+        """
+        UPDATE autotrade_active_universe
+        SET status='REMOVED',
+            removed_date=?,
+            removed_reason=?,
+            updated_at=?
+        WHERE code=?
+        """,
+        (str(removed_date), str(reason or ""), now, str(code)),
+    )
+
+def _autotrade_selection_codes(payload: Dict[str, Any]) -> tuple[set[str], Dict[str, Dict[str, Any]]]:
+    """Return (codes_set, by_code_row) from a selection snapshot payload."""
+    rows = [c for c in (payload.get("candidates") or []) if isinstance(c, dict) and str(c.get("code") or "").strip()]
+    by_code = {str(r.get("code")).strip(): r for r in rows}
+    return set(by_code.keys()), by_code
+
+def _autotrade_sync_active_universe(
+    conn: sqlite3.Connection,
+    settings: Dict[str, Any],
+    *,
+    plan_date: str,
+    today_candidates: list[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Incrementally update active universe based on selection transitions.
+
+    Rule:
+      - Add: any newly "entered" code.
+      - Remove: only if exit_reason == "상승추세(MA25) 조건 붕괴".
+      - Ignore other exit reasons (keep ACTIVE).
+    """
+    last_date = _autotrade_kv_get(conn, "autotrade_active_last_date")
+    # First run: seed active universe with today's candidates.
+    if not last_date:
+        for r in today_candidates:
+            code = _normalize_code(r.get("code"))
+            if not code:
+                continue
+            _autotrade_active_upsert(
+                conn,
+                code=code,
+                name=str(r.get("name") or "").strip() or code,
+                market=str(r.get("market") or "").strip() or "KR",
+                seen_date=str(plan_date),
+            )
+        _autotrade_kv_set(conn, "autotrade_active_last_date", str(plan_date))
+        return {"seeded": True, "processed_dates": 0, "added": len(today_candidates), "removed_trend": 0}
+
+    # Process all intermediate trading dates (if any) from last_date -> plan_date.
+    date_rows = conn.execute(
+        """
+        SELECT DISTINCT date
+        FROM daily_price
+        WHERE date > ? AND date <= ?
+        ORDER BY date ASC
+        """,
+        (str(last_date), str(plan_date)),
+    ).fetchall()
+    todo = [str(r[0]) for r in (date_rows or []) if r and str(r[0]).strip()]
+
+    prev_date = str(last_date)
+    removed_trend = 0
+    added = 0
+    processed = 0
+
+    # Build prev snapshot once, then roll forward.
+    prev_snap = _build_selection_snapshot_payload(conn, settings, as_of_date=prev_date)
+    prev_codes, _prev_by_code = _autotrade_selection_codes(prev_snap)
+
+    for cur_date in todo:
+        cur_snap = _build_selection_snapshot_payload(conn, settings, as_of_date=cur_date)
+        cur_codes, cur_by_code = _autotrade_selection_codes(cur_snap)
+
+        entered = sorted(cur_codes - prev_codes)
+        exited = sorted(prev_codes - cur_codes)
+
+        for code in entered:
+            row = cur_by_code.get(code) or {}
+            _autotrade_active_upsert(
+                conn,
+                code=code,
+                name=str(row.get("name") or "").strip() or code,
+                market=str(row.get("market") or "").strip() or "KR",
+                seen_date=str(cur_date),
+            )
+            added += 1
+
+        for code in exited:
+            reason = _selection_exit_reason(code, prev_snap, cur_snap)
+            if str(reason).strip() == "상승추세(MA25) 조건 붕괴":
+                _autotrade_active_mark_removed(conn, code=code, removed_date=str(cur_date), reason=str(reason))
+                removed_trend += 1
+
+        prev_date = cur_date
+        prev_snap = cur_snap
+        prev_codes = cur_codes
+        processed += 1
+
+    _autotrade_kv_set(conn, "autotrade_active_last_date", str(plan_date))
+    return {"seeded": False, "processed_dates": processed, "added": added, "removed_trend": removed_trend}
+
+def _autotrade_build_trade_rows(
+    *,
+    active_rows: list[Dict[str, Any]],
+    today_candidates: list[Dict[str, Any]],
+    limit: int,
+) -> list[Dict[str, Any]]:
+    """Prioritize today's candidates first, then fill with remaining active universe."""
+    today_list = [r for r in today_candidates if isinstance(r, dict) and str(r.get("code") or "").strip()]
+    out: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # 1) current candidates (UI order)
+    for r in today_list:
+        code = _normalize_code(r.get("code"))
+        if not code or code in seen:
+            continue
+        out.append(
+            {
+                "code": code,
+                "name": str(r.get("name") or "").strip() or code,
+                "market": str(r.get("market") or "").strip() or "KR",
+            }
+        )
+        seen.add(code)
+        if limit > 0 and len(out) >= limit:
+            return out
+
+    # 2) remaining active universe (recent first)
+    for r in active_rows:
+        code = _normalize_code(r.get("code"))
+        if not code or code in seen:
+            continue
+        out.append(
+            {
+                "code": code,
+                "name": str(r.get("name") or "").strip() or code,
+                "market": str(r.get("market") or "").strip() or "KR",
+            }
+        )
+        seen.add(code)
+        if limit > 0 and len(out) >= limit:
+            return out
+
+    return out
+
 def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _autotrade_webhook_config()
     webhook_url = cfg.get("url") or ""
@@ -1001,37 +1217,31 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
 
         # Build targets from the same selection snapshot the UI uses.
         sel = _build_selection_snapshot_payload(conn, settings, as_of_date=plan_date)
-        candidates = [c for c in (sel.get("candidates") or []) if isinstance(c, dict) and str(c.get("code") or "").strip()]
-        if AUTOTRADE_MAX_SELECTION_CODES > 0:
-            candidates = candidates[:AUTOTRADE_MAX_SELECTION_CODES]
+        today_candidates = [
+            c
+            for c in (sel.get("candidates") or [])
+            if isinstance(c, dict) and str(c.get("code") or "").strip()
+        ]
 
-        history_anchor = sel.get("date") or plan_date
-        history = _build_selection_history(conn, settings, as_of_date=str(history_anchor), days=AUTOTRADE_EXIT_WINDOW_DAYS)
-        events = [e for e in (history.get("events") or []) if isinstance(e, dict)]
+        # Sync active universe: add entries, remove ONLY on "상승추세(MA25) 조건 붕괴".
+        sync_res = _autotrade_sync_active_universe(
+            conn,
+            settings,
+            plan_date=str(plan_date),
+            today_candidates=today_candidates,
+        )
 
-        exited_rows: list[Dict[str, Any]] = []
-        seen_exits: set[str] = set()
-        for ev in events:
-            if str(ev.get("event_type") or "") != "exited":
-                continue
-            code = _normalize_code(ev.get("code"))
-            if not code or code in seen_exits:
-                continue
-            seen_exits.add(code)
-            exited_rows.append(
-                {
-                    "code": code,
-                    "name": str(ev.get("name") or "").strip(),
-                    "market": str(ev.get("market") or "").strip(),
-                    "date": str(ev.get("date") or "").strip(),
-                    "exit_reason": str(ev.get("exit_reason") or "").strip(),
-                }
-            )
-            if AUTOTRADE_MAX_EXIT_CODES > 0 and len(exited_rows) >= AUTOTRADE_MAX_EXIT_CODES:
-                break
+        active_rows = _autotrade_active_fetch(conn)
 
-        cand_codes = {_normalize_code(c.get("code")) for c in candidates if isinstance(c, dict)}
-        exited_rows = [r for r in exited_rows if r.get("code") and r["code"] not in cand_codes]
+        # Determine today's trade list:
+        # - Prefer today's candidates first (UI order)
+        # - Then fill with remaining active universe
+        max_codes = int(AUTOTRADE_MAX_SELECTION_CODES or 0)
+        trade_rows = _autotrade_build_trade_rows(
+            active_rows=active_rows,
+            today_candidates=today_candidates,
+            limit=max_codes,
+        )
 
         db_path = str(DB_PATH.resolve())
         desired_buy_codes: list[str] = []
@@ -1048,8 +1258,8 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
                 return "NASDAQ", "USD"
             return "KRX", "KRW"
 
-        # Candidates -> BUY pending
-        for row in candidates:
+        # Trade list -> BUY pending
+        for row in trade_rows:
             code = _normalize_code(row.get("code"))
             if not code:
                 continue
@@ -1139,8 +1349,10 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
             "plan_date": plan_date,
             "exec_date": exec_date,
             "counts": {
-                "candidates": len(candidates),
-                "exited": len(exited_rows),
+                "today_candidates": len(today_candidates),
+                "active_universe": len(active_rows),
+                "trade_rows": len(trade_rows),
+                "active_sync": sync_res,
                 "plans_upserted": plan_rows,
                 "queue_upserted": queue_rows,
                 "buy_pending": len(set(desired_buy_codes)),
