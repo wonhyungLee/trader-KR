@@ -17,8 +17,8 @@ sell:
   stop_loss: -0.10
   max_holding_days: 10
 position:
-  max_positions: 10
-  max_per_sector: 3
+  max_positions: 5
+  max_per_sector: 1
   initial_cash: 10000000
   capital_utilization: 1.0
 report:

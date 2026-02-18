@@ -1123,29 +1123,13 @@ def _autotrade_build_trade_rows(
     today_candidates: list[Dict[str, Any]],
     limit: int,
 ) -> list[Dict[str, Any]]:
-    """Prioritize today's candidates first, then fill with remaining active universe."""
+    """Build trade rows from today's selection only (UI rank order)."""
     today_list = [r for r in today_candidates if isinstance(r, dict) and str(r.get("code") or "").strip()]
     out: list[Dict[str, Any]] = []
     seen: set[str] = set()
 
-    # 1) current candidates (UI order)
+    # Current candidates only (UI order)
     for r in today_list:
-        code = _normalize_code(r.get("code"))
-        if not code or code in seen:
-            continue
-        out.append(
-            {
-                "code": code,
-                "name": str(r.get("name") or "").strip() or code,
-                "market": str(r.get("market") or "").strip() or "KR",
-            }
-        )
-        seen.add(code)
-        if limit > 0 and len(out) >= limit:
-            return out
-
-    # 2) remaining active universe (recent first)
-    for r in active_rows:
         code = _normalize_code(r.get("code"))
         if not code or code in seen:
             continue
@@ -2148,8 +2132,8 @@ def _build_selection_snapshot_payload(
     buy_kospi = float(getattr(params, "buy_kospi", 0) or 0)
     buy_kosdaq = float(getattr(params, "buy_kosdaq", 0) or 0)
     max_positions = int(getattr(params, "max_positions", 10) or 10)
-    # 추천 항목에서는 동일 섹터에서 상위 종목 1개만 허용한다.
-    max_per_sector = 1
+    # 섹터 중복 제외: 설정값을 사용하되 1 미만으로 내려가지 않게 고정.
+    max_per_sector = max(1, int(getattr(params, "max_per_sector", 1) or 1))
     rank_mode = str(getattr(params, "rank_mode", "amount") or "amount").lower()
     entry_mode = str(getattr(params, "entry_mode", "mean_reversion") or "mean_reversion").lower()
     take_profit_ret = float(getattr(params, "take_profit_ret", 0) or 0)
@@ -3244,8 +3228,8 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
     buy_kospi = float(getattr(params, "buy_kospi", 0) or 0)
     buy_kosdaq = float(getattr(params, "buy_kosdaq", 0) or 0)
     max_positions = int(getattr(params, "max_positions", 10) or 10)
-    # 추천 항목에서는 동일 섹터에서 상위 종목 1개만 허용한다.
-    max_per_sector = 1
+    # 섹터 중복 제외: 설정값을 사용하되 1 미만으로 내려가지 않게 고정.
+    max_per_sector = max(1, int(getattr(params, "max_per_sector", 1) or 1))
     rank_mode = str(getattr(params, "rank_mode", "amount") or "amount").lower()
     entry_mode = str(getattr(params, "entry_mode", "mean_reversion") or "mean_reversion").lower()
     trend_filter = bool(getattr(params, "trend_ma25_rising", False))

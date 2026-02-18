@@ -11,4 +11,5 @@ sell:
   stop_loss: -0.05
   max_holding_days: 3
 position:
-  max_positions: 10
+  max_positions: 5
+  max_per_sector: 1

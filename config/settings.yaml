@@ -58,7 +58,7 @@ monitor:
   scan_interval_sec: 60
   rest_batch_size: 30
   rest_max_retries: 5
-  max_ws_subs: 20
+  max_ws_subs: 5
   ws_subscribe_interval_sec: 0.2
   subscribe_cooldown_sec: 180
   alert_cooldown_sec: 600
@@ -105,7 +105,7 @@ strategy:
   disparity_sell: -0.01
   stop_loss: -0.05
   max_holding_days: 3
-  max_positions: 10
-  max_per_sector: 0
+  max_positions: 5
+  max_per_sector: 1
   trend_ma25_rising: false
   selection_horizon_days: 1
