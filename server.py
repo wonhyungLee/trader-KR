@@ -1217,14 +1217,14 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
 
         active_rows = _autotrade_active_fetch(conn)
 
-        # Determine today's trade list:
-        # - Prefer today's candidates first (UI order)
-        # - Then fill with remaining active universe
+        # Determine today's trade list (UI rank order).
+        # Note: build all candidates first, then enforce max_codes after
+        # recommendation/plan validation so rejected codes can be backfilled.
         max_codes = int(AUTOTRADE_MAX_SELECTION_CODES or 0)
         trade_rows = _autotrade_build_trade_rows(
             active_rows=active_rows,
             today_candidates=today_candidates,
-            limit=max_codes,
+            limit=0,
         )
 
         db_path = str(DB_PATH.resolve())
@@ -1232,6 +1232,8 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
         desired_sell_codes: list[str] = []
         plan_rows = 0
         queue_rows = 0
+        skipped_not_ok = 0
+        skipped_no_entry = 0
 
         def _exchange_quote(market: str) -> tuple[str, str]:
             # Current viewer universe is KR only.
@@ -1244,6 +1246,8 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
 
         # Trade list -> BUY pending
         for row in trade_rows:
+            if max_codes > 0 and queue_rows >= max_codes:
+                break
             code = _normalize_code(row.get("code"))
             if not code:
                 continue
@@ -1251,6 +1255,7 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
             market = str(row.get("market") or "").strip() or "KR"
             rec = _autotrade_recommend_code(code, db_path=db_path, optimize=AUTOTRADE_ENGINE_OPTIMIZE)
             if not isinstance(rec, dict) or not rec.get("ok"):
+                skipped_not_ok += 1
                 continue
             plan = rec.get("plan") if isinstance(rec.get("plan"), dict) else {}
             entry = _safe_float(plan.get("entry_price"))
@@ -1276,6 +1281,7 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
             plan_rows += 1
 
             if entry_q is None:
+                skipped_no_entry += 1
                 continue
 
             payload_no_pw = {
@@ -1336,6 +1342,9 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "today_candidates": len(today_candidates),
                 "active_universe": len(active_rows),
                 "trade_rows": len(trade_rows),
+                "trade_limit": max_codes,
+                "skipped_not_ok": skipped_not_ok,
+                "skipped_no_entry": skipped_no_entry,
                 "active_sync": sync_res,
                 "plans_upserted": plan_rows,
                 "queue_upserted": queue_rows,
