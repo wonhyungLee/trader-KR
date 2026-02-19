@@ -390,6 +390,11 @@ function App() {
   }, [selected, days])
 
   const candidates = useMemo(() => asArray(selection?.candidates), [selection])
+  const selectedCandidate = useMemo(() => {
+    if (!selected) return null
+    const code = String(selected.code || '')
+    return candidates.find((c) => String(c?.code || '') === code) || null
+  }, [selected, candidates])
   const candidateCodesKey = useMemo(() => candidates.map((c) => c?.code).filter(Boolean).join(','), [candidates])
   const selectedWsLivePrice = useMemo(() => {
     if (!selected) return null
@@ -528,9 +533,18 @@ function App() {
     }
     if (realtimePrice !== null && realtimePrice !== undefined) return realtimePrice
     if (!selected) return null
-    const cand = candidates.find(c => c.code === selected.code)
-    return cand ? cand.close : latest?.close
-  }, [selected, candidates, latest, realtimePrice, candidateLivePrices])
+    return selectedCandidate ? selectedCandidate.close : latest?.close
+  }, [selected, selectedCandidate, latest, realtimePrice, candidateLivePrices])
+
+  const selectedRecommendationMeta = useMemo(() => {
+    if (!selectedCandidate) return '-'
+    const target = selectedCandidate?.recommended_target_price
+    const stop = selectedCandidate?.recommended_stop_price
+    const parts = []
+    if (target !== null && target !== undefined) parts.push(`목표 ${formatCurrency(target)}`)
+    if (stop !== null && stop !== undefined) parts.push(`손절 ${formatCurrency(stop)}`)
+    return parts.length ? parts.join(' · ') : '-'
+  }, [selectedCandidate])
 
   const rangeOptions = [
     { label: '1Y', value: 252 },
@@ -1160,6 +1174,14 @@ function App() {
                               <span>현재가</span>
                               <strong>{formatCurrency(candidateLivePrices?.[r.code]?.price ?? r.close)}</strong>
                             </div>
+                            <div className="candidate-card-metric">
+                              <span>매수 추천가</span>
+                              <strong>{formatCurrency(r.recommended_buy_price)}</strong>
+                            </div>
+                            <div className="candidate-card-metric">
+                              <span>매도 추천가</span>
+                              <strong>{formatCurrency(r.recommended_sell_price)}</strong>
+                            </div>
                           </div>
                         </button>
                       ))}
@@ -1169,12 +1191,12 @@ function App() {
                       <table className="candidate-table">
                         <thead>
                           <tr>
-                            <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th>
+                            <th>순위</th><th>종목 정보</th><th>시장</th><th>괴리율</th><th>거래대금</th><th>현재가</th><th>매수 추천가</th><th>매도 추천가</th>
                           </tr>
                         </thead>
                         <tbody>
                           {candidates.length === 0 ? (
-                            <tr className="empty-row"><td colSpan="6" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
+                            <tr className="empty-row"><td colSpan="8" className="empty">후보가 없습니다 (데이터/전략 조건 확인)</td></tr>
                           ) : candidates.map((r) => (
                             <tr
                               key={`${r.code}-${r.rank}`}
@@ -1215,6 +1237,16 @@ function App() {
                               <td>
                                 <div className="candidate-metric">
                                   <strong>{formatCurrency(candidateLivePrices?.[r.code]?.price ?? r.close)}</strong>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="candidate-metric">
+                                  <strong>{formatCurrency(r.recommended_buy_price)}</strong>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="candidate-metric">
+                                  <strong>{formatCurrency(r.recommended_sell_price)}</strong>
                                 </div>
                               </td>
                             </tr>
@@ -1611,6 +1643,8 @@ function App() {
                   <div className="mchart-footmeta">
                     <span>전일종가 {formatCurrency(prev?.close)}</span>
                     <span className="mono">{prev?.date || '-'}</span>
+                    <span>매수 추천가 {formatCurrency(selectedCandidate?.recommended_buy_price)}</span>
+                    <span>매도 추천가 {formatCurrency(selectedCandidate?.recommended_sell_price)}</span>
                   </div>
                 </div>
               </div>
@@ -1655,6 +1689,16 @@ function App() {
                       <div className="chart-title" style={{ color: 'var(--accent-2)' }}>현재가</div>
                       <div className="delta-value">{formatCurrency(livePrice)}</div>
                       <div className="delta-sub">{latest?.date || '-'}</div>
+                    </div>
+                    <div>
+                      <div className="chart-title">매수 추천가</div>
+                      <div className="delta-value" style={{ fontSize: '16px' }}>{formatCurrency(selectedCandidate?.recommended_buy_price)}</div>
+                      <div className="delta-sub">{selectedCandidate?.recommendation_status || '-'}</div>
+                    </div>
+                    <div>
+                      <div className="chart-title">매도 추천가</div>
+                      <div className="delta-value" style={{ fontSize: '16px' }}>{formatCurrency(selectedCandidate?.recommended_sell_price)}</div>
+                      <div className="delta-sub">{selectedRecommendationMeta}</div>
                     </div>
                     <div className="delta">
                       <div className="chart-title">변동</div>

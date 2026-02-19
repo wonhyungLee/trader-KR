@@ -691,6 +691,7 @@ body {
 
 .chart-summary {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 16px;
@@ -1576,6 +1577,7 @@ body {
 
 .candidate-table {
   width: 100%;
+  min-width: 980px;
   border-collapse: separate;
   border-spacing: 0 10px;
 }
@@ -1763,7 +1765,7 @@ body {
 
 .candidate-card-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   padding-top: 10px;
   border-top: 1px solid rgba(148, 163, 184, 0.12);
@@ -1793,7 +1795,7 @@ body {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .candidate-card-metric:last-child {
-    grid-column: 1 / -1;
+    grid-column: auto;
   }
 }
 

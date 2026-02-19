@@ -768,6 +768,128 @@ def _autotrade_recommend_code(code: str, *, db_path: str, optimize: bool) -> Dic
     return recommend_code(code, cfg, optimize=bool(optimize))
 
 
+def _selection_exchange_quote_from_market(market: Any) -> tuple[str, str]:
+    _m = str(market or "").upper()
+    if _m.startswith("NYSE"):
+        return "NYSE", "USD"
+    if _m.startswith("NASDAQ"):
+        return "NASDAQ", "USD"
+    return "KRX", "KRW"
+
+
+def _selection_recommended_sell_price(stop_price: Optional[float], target_price: Optional[float]) -> Optional[float]:
+    src = str(AUTOTRADE_SELL_PRICE_SOURCE or "target").strip().lower()
+    if src == "stop":
+        return stop_price if stop_price is not None else target_price
+    return target_price if target_price is not None else stop_price
+
+
+def _selection_recommend_price_map(
+    conn: sqlite3.Connection,
+    candidates: list[Dict[str, Any]],
+    *,
+    plan_date: str | None,
+) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    rows = [c for c in candidates if isinstance(c, dict) and _normalize_code(c.get("code"))]
+    if not rows:
+        return out
+
+    plan_date_str = str(plan_date or "").strip()
+    code_order: list[str] = []
+    for row in rows:
+        code = _normalize_code(row.get("code"))
+        if code and code not in code_order:
+            code_order.append(code)
+
+    if plan_date_str and code_order:
+        try:
+            placeholder = ",".join("?" * len(code_order))
+            sql = f"""
+                SELECT code, entry_price, stop_price, target_price, engine_status, confidence
+                FROM autotrade_engine_plan
+                WHERE plan_date=?
+                  AND code IN ({placeholder})
+            """
+            for rec_row in conn.execute(sql, (plan_date_str, *code_order)).fetchall():
+                code = _normalize_code(rec_row["code"])
+                if not code:
+                    continue
+                entry = _safe_float(rec_row["entry_price"])
+                stop = _safe_float(rec_row["stop_price"])
+                target = _safe_float(rec_row["target_price"])
+                out[code] = {
+                    "recommended_buy_price": entry,
+                    "recommended_sell_price": _selection_recommended_sell_price(stop, target),
+                    "recommended_stop_price": stop,
+                    "recommended_target_price": target,
+                    "recommendation_status": str(rec_row["engine_status"] or "").strip() or None,
+                    "recommendation_confidence": _safe_float(rec_row["confidence"]),
+                    "recommendation_source": "plan_table",
+                    "recommendation_error": None,
+                }
+        except Exception as exc:
+            logging.warning("selection recommend plan lookup failed (plan_date=%s): %s", plan_date_str, exc)
+
+    missing_rows = [row for row in rows if _normalize_code(row.get("code")) not in out]
+    if not missing_rows:
+        return out
+
+    db_path = str(DB_PATH.resolve())
+    for row in missing_rows:
+        code = _normalize_code(row.get("code"))
+        if not code:
+            continue
+        _exchange, quote = _selection_exchange_quote_from_market(row.get("market"))
+        try:
+            rec = _autotrade_recommend_code(code, db_path=db_path, optimize=AUTOTRADE_ENGINE_OPTIMIZE)
+            if not isinstance(rec, dict) or not rec.get("ok"):
+                out[code] = {
+                    "recommended_buy_price": None,
+                    "recommended_sell_price": None,
+                    "recommended_stop_price": None,
+                    "recommended_target_price": None,
+                    "recommendation_status": "unavailable",
+                    "recommendation_confidence": None,
+                    "recommendation_source": "engine",
+                    "recommendation_error": (
+                        str(rec.get("error") or "recommend_failed").strip()
+                        if isinstance(rec, dict)
+                        else "recommend_failed"
+                    ),
+                }
+                continue
+            plan = rec.get("plan") if isinstance(rec.get("plan"), dict) else {}
+            entry = _safe_float(plan.get("entry_price"))
+            stop = _safe_float(plan.get("stop_price"))
+            target = _safe_float(plan.get("target_price"))
+            entry_q = _autotrade_round_limit_price(entry, quote=quote, side="buy") if entry is not None else None
+            stop_q = _autotrade_round_limit_price(stop, quote=quote, side="sell") if stop is not None else None
+            target_q = _autotrade_round_limit_price(target, quote=quote, side="sell") if target is not None else None
+            out[code] = {
+                "recommended_buy_price": entry_q,
+                "recommended_sell_price": _selection_recommended_sell_price(stop_q, target_q),
+                "recommended_stop_price": stop_q,
+                "recommended_target_price": target_q,
+                "recommendation_status": str(rec.get("status") or "").strip() or None,
+                "recommendation_confidence": _safe_float(rec.get("confidence")),
+                "recommendation_source": "engine",
+                "recommendation_error": None,
+            }
+        except Exception as exc:
+            out[code] = {
+                "recommended_buy_price": None,
+                "recommended_sell_price": None,
+                "recommended_stop_price": None,
+                "recommended_target_price": None,
+                "recommendation_status": "error",
+                "recommendation_confidence": None,
+                "recommendation_source": "engine",
+                "recommendation_error": str(exc).strip()[:160] or "recommend_exception",
+            }
+    return out
+
+
 def _autotrade_upsert_plan(
     conn: sqlite3.Connection,
     *,
@@ -1232,6 +1354,9 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
         desired_sell_codes: list[str] = []
         plan_rows = 0
         queue_rows = 0
+        queue_buy_rows = 0
+        queue_sell_rows = 0
+        selected_code_rows = 0
         skipped_not_ok = 0
         skipped_no_entry = 0
 
@@ -1244,9 +1369,9 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
                 return "NASDAQ", "USD"
             return "KRX", "KRW"
 
-        # Trade list -> BUY pending
+        # Trade list -> BUY/SELL pending
         for row in trade_rows:
-            if max_codes > 0 and queue_rows >= max_codes:
+            if max_codes > 0 and selected_code_rows >= max_codes:
                 break
             code = _normalize_code(row.get("code"))
             if not code:
@@ -1284,7 +1409,7 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
                 skipped_no_entry += 1
                 continue
 
-            payload_no_pw = {
+            payload_buy_no_pw = {
                 "exchange": exchange,
                 "base": code,
                 "quote": quote,
@@ -1315,14 +1440,58 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
                 percent="NaN",
                 order_name=f"{name} 매매",
                 webhook_url=webhook_url,
-                payload_json=json.dumps(payload_no_pw, ensure_ascii=False),
+                payload_json=json.dumps(payload_buy_no_pw, ensure_ascii=False),
                 status="PENDING",
             )
             desired_buy_codes.append(code)
             queue_rows += 1
+            queue_buy_rows += 1
 
-        # Exit-based SELL automation is intentionally disabled.
-        # Keep desired_sell_codes empty so stale pending SELL orders are cancelled below.
+            sell_q = _selection_recommended_sell_price(stop_q, target_q)
+            if sell_q is not None:
+                sell_trigger_op = "gte"
+                if entry_q is not None:
+                    sell_trigger_op = "gte" if float(sell_q) >= float(entry_q) else "lte"
+                payload_sell_no_pw = {
+                    "exchange": exchange,
+                    "base": code,
+                    "quote": quote,
+                    "side": "sell",
+                    "type": "limit",
+                    "amount": str(AUTOTRADE_QTY),
+                    "price": _autotrade_format_price_str(sell_q, quote=quote),
+                    "percent": "NaN",
+                    "order_name": f"{name} 매도",
+                    "kis_number": str(kis_number),
+                }
+                _autotrade_upsert_queue_order(
+                    conn,
+                    plan_date=str(plan_date),
+                    exec_date=str(exec_date),
+                    code=code,
+                    name=name,
+                    market=market,
+                    side="sell",
+                    order_type="limit",
+                    qty=AUTOTRADE_QTY,
+                    trigger_op=sell_trigger_op,
+                    trigger_price=sell_q,
+                    limit_price=sell_q,
+                    exchange=exchange,
+                    quote=quote,
+                    percent="NaN",
+                    order_name=f"{name} 매도",
+                    webhook_url=webhook_url,
+                    payload_json=json.dumps(payload_sell_no_pw, ensure_ascii=False),
+                    status="PENDING",
+                )
+                desired_sell_codes.append(code)
+                queue_rows += 1
+                queue_sell_rows += 1
+
+            selected_code_rows += 1
+
+        # Keep BUY/SELL queue aligned with desired code set.
 
         _autotrade_cancel_missing(
             conn,
@@ -1348,6 +1517,8 @@ def _autotrade_rebuild_queue(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "active_sync": sync_res,
                 "plans_upserted": plan_rows,
                 "queue_upserted": queue_rows,
+                "queue_buy_upserted": queue_buy_rows,
+                "queue_sell_upserted": queue_sell_rows,
                 "buy_pending": len(set(desired_buy_codes)),
                 "sell_pending": len(set(desired_sell_codes)),
             },
@@ -2134,6 +2305,7 @@ def _build_selection_snapshot_payload(
     settings: Dict[str, Any],
     as_of_date: str | None = None,
     date_range_start: str | None = None,
+    include_recommendations: bool = False,
 ) -> Dict[str, Any]:
     params = load_strategy(settings)
     min_amount = float(getattr(params, "min_amount", 0) or 0)
@@ -2306,6 +2478,24 @@ def _build_selection_snapshot_payload(
             "industry_name": row.get("industry_name"),
         })
 
+    if include_recommendations and candidates:
+        rec_map = _selection_recommend_price_map(conn, candidates, plan_date=as_of_date or latest["date"].max())
+        for cand in candidates:
+            code = _normalize_code(cand.get("code"))
+            extra = rec_map.get(code) or {}
+            cand.update(
+                {
+                    "recommended_buy_price": extra.get("recommended_buy_price"),
+                    "recommended_sell_price": extra.get("recommended_sell_price"),
+                    "recommended_stop_price": extra.get("recommended_stop_price"),
+                    "recommended_target_price": extra.get("recommended_target_price"),
+                    "recommendation_status": extra.get("recommendation_status"),
+                    "recommendation_confidence": extra.get("recommendation_confidence"),
+                    "recommendation_source": extra.get("recommendation_source"),
+                    "recommendation_error": extra.get("recommendation_error"),
+                }
+            )
+
     stages = [
         {"key": "universe", "label": "Universe", "count": total, "value": len(codes), "enabled": True},
         {"key": "min_amount", "label": "Amount Filter", "count": len(stage_min), "value": min_amount, "enabled": min_enabled},
@@ -2336,7 +2526,12 @@ def _build_selection_snapshot_payload(
             "buy_thresholds": {"kospi": buy_kospi, "kosdaq": buy_kosdaq},
         },
         "filter_toggles": filter_toggles,
-        "pricing": {"sell_rules": {"take_profit_ret": take_profit_ret}},
+        "pricing": {
+            "sell_rules": {
+                "take_profit_ret": take_profit_ret,
+                "sell_price_source": AUTOTRADE_SELL_PRICE_SOURCE,
+            }
+        },
     }
 
 
@@ -2503,16 +2698,22 @@ def _build_selection_snapshot(
     notify: bool = False,
     as_of_date: str | None = None,
     include_history: bool = False,
+    include_recommendations: bool = False,
 ) -> Dict[str, Any]:
     now_ts = time.time()
     as_of_date = str(as_of_date) if as_of_date else None
 
     cached = _selection_cache.get("data")
-    can_use_cache = not force and as_of_date is None and not include_history
+    can_use_cache = not force and as_of_date is None and not include_history and not include_recommendations
     if can_use_cache and cached and now_ts - _selection_cache.get("ts", 0) < 30:
         return cached
 
-    data = _build_selection_snapshot_payload(conn, settings, as_of_date=as_of_date)
+    data = _build_selection_snapshot_payload(
+        conn,
+        settings,
+        as_of_date=as_of_date,
+        include_recommendations=include_recommendations,
+    )
 
     if include_history:
         history_anchor = data.get("date") or as_of_date
@@ -3368,7 +3569,7 @@ def _build_selection_summary(conn: sqlite3.Connection, settings: Dict[str, Any])
 def selection():
     conn = get_conn()
     settings = load_settings()
-    return jsonify(_build_selection_snapshot(conn, settings, include_history=True))
+    return jsonify(_build_selection_snapshot(conn, settings, include_history=True, include_recommendations=True))
 
 
 @app.get("/status")
