@@ -109,13 +109,35 @@ class KISKeySession:
             "appkey": self.app_key,
             "appsecret": self.app_secret,
         }
-        resp = self.session.post(url, json=body, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        token = data.get("access_token") or data.get("access_token_token") or data.get("approval_key")
-        exp_sec = int(data.get("expires_in", 3600))
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=exp_sec)
-        return token, expires_at
+        last_resp = None
+        for attempt in range(2):
+            resp = self.session.post(url, json=body, timeout=10)
+            last_resp = resp
+            text = resp.text or ""
+            # KIS sometimes limits token issuance to once per minute (EGW00133).
+            # Wait once and retry to avoid escalating to long global cooldowns.
+            if resp.status_code == 403 and ("EGW00133" in text or "1분당 1회" in text):
+                if attempt == 0:
+                    wait_sec = 61.0
+                    logging.warning(
+                        "tokenP rate limited for key %s; retrying in %.1fs",
+                        self.app_key[:8],
+                        wait_sec,
+                    )
+                    time.sleep(wait_sec)
+                    continue
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("access_token") or data.get("access_token_token") or data.get("approval_key")
+            if not token:
+                raise RuntimeError(f"token missing from response: {data}")
+            exp_sec = int(data.get("expires_in", 3600))
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=exp_sec)
+            return token, expires_at
+
+        if last_resp is not None:
+            last_resp.raise_for_status()
+        raise RuntimeError("token issuance failed")
 
     def issue_ws_approval(self) -> str:
         url = f"{self.base_url}/oauth2/Approval"

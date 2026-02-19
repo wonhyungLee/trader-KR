@@ -34,6 +34,15 @@ def _sleep_on_error(exc: Exception, settings: dict, client=None) -> None:
     )
     if "403" in msg:
         sleep_sec = float(settings.get("kis", {}).get("auth_forbidden_cooldown_sec", 600))
+        if client is not None and hasattr(client, "broker"):
+            try:
+                client.broker.clear_token_cache()
+                client.broker.reset_sessions()
+            except Exception:
+                pass
+        # tokenP(1분당 1회) 제한은 짧은 대기 후 재시도가 유리하다.
+        if "EGW00133" in msg or "1분당 1회" in msg:
+            sleep_sec = min(sleep_sec, 65.0)
     elif is_rate_limit:
         sleep_sec = float(settings.get("kis", {}).get("auth_forbidden_cooldown_sec", 600))
         if client is not None and hasattr(client, "broker"):
