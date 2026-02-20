@@ -1857,6 +1857,9 @@ _COUPANG_BANNER_KEYWORDS = [
 ]
 
 _COUPANG_BANNER_CTA_VARIANTS = ["최저가 보기", "배송 일정 확인", "리뷰 보고 선택"]
+_COUPANG_LINK_FILE_ENV_KEY = "COUPANG_AD_LINKS_FILE"
+_COUPANG_LINK_FILE_CANDIDATES = ("쿠팡광고링크.txt", "../쿠팡광고링크.txt")
+_COUPANG_LINK_PATTERN = re.compile(r"https?://[^\s|)]+")
 
 
 def _encode_coupang_component(value: Any) -> str:
@@ -1988,6 +1991,67 @@ def _coupang_map_products(products: list[dict], *, badge: str = "생필품") -> 
             }
         )
     return items
+
+
+def _resolve_coupang_link_file() -> Optional[Path]:
+    candidates: list[Path] = []
+    env_path = str(os.getenv(_COUPANG_LINK_FILE_ENV_KEY, "") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.extend(Path(rel_path) for rel_path in _COUPANG_LINK_FILE_CANDIDATES)
+
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def _load_coupang_link_file_items(
+    limit: int = 3,
+) -> Tuple[Optional[Path], list[Dict[str, Any]], Optional[str], Optional[str]]:
+    path = _resolve_coupang_link_file()
+    if path is None:
+        return None, [], None, None
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return path, [], "link_file_read_error", str(exc).strip() or "쿠팡광고링크.txt 읽기 실패"
+
+    links: list[str] = []
+    seen: set[str] = set()
+    for match in _COUPANG_LINK_PATTERN.findall(raw_text or ""):
+        link = str(match).strip().rstrip(").,")
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        links.append(link)
+
+    if not links:
+        return path, [], "link_file_empty", "쿠팡광고링크.txt에 유효한 링크가 없습니다."
+
+    max_items = max(1, min(30, int(limit or 3)))
+    items: list[Dict[str, Any]] = []
+    for idx, link in enumerate(links[:max_items]):
+        items.append(
+            {
+                "title": f"쿠팡 추천 링크 {idx + 1}",
+                "image": "",
+                "link": link,
+                "price": "",
+                "meta": "쿠팡파트너스 링크",
+                "badge": "쿠팡",
+                "discountRate": None,
+                "cta": "쿠팡에서 보기",
+                "shippingTag": "",
+                "ratingCount": None,
+                "rating": None,
+            }
+        )
+    return path, items, None, None
 
 def _dummy_portfolio_positions(conn: sqlite3.Connection, max_positions: int = 8) -> list[Dict[str, Any]]:
     _ensure_latest_table(conn)
@@ -2768,6 +2832,26 @@ def serve_index_bnf():
     return send_from_directory(app.static_folder, "index.html")
 
 
+def _serve_coupang_link_file_response():
+    path = _resolve_coupang_link_file()
+    if path is None:
+        return ("쿠팡광고링크.txt not found", 404)
+    try:
+        return send_from_directory(str(path.parent.resolve()), path.name, mimetype="text/plain; charset=utf-8")
+    except Exception:
+        return ("쿠팡광고링크.txt not found", 404)
+
+
+@app.route("/쿠팡광고링크.txt")
+def serve_coupang_links_txt():
+    return _serve_coupang_link_file_response()
+
+
+@app.route("/bnf/쿠팡광고링크.txt")
+def serve_coupang_links_txt_bnf():
+    return _serve_coupang_link_file_response()
+
+
 @app.route("/<path:path>")
 def serve_static(path: str):
     if (FRONTEND_DIST / path).exists():
@@ -2986,6 +3070,24 @@ def api_coupang_banner():
     except Exception:
         limit = 3
     limit = max(1, min(10, limit))
+
+    link_file_path, link_file_items, link_file_error, link_file_error_message = _load_coupang_link_file_items(limit=limit)
+    if link_file_path is not None:
+        payload = {
+            "error": link_file_error,
+            "error_message": link_file_error_message,
+            "keyword": "manual_links",
+            "theme": {
+                "id": "manual-links",
+                "title": "쿠팡 추천 링크",
+                "tagline": "쿠팡광고링크.txt에 등록된 제휴 링크입니다.",
+                "cta": "쿠팡에서 보기",
+            },
+            "items": link_file_items,
+            "source": "link_file",
+            "source_file": str(link_file_path),
+        }
+        return jsonify(payload)
 
     access_key = str(os.getenv("COUPANG_ACCESS_KEY", "") or "").strip()
     secret_key = str(os.getenv("COUPANG_SECRET_KEY", "") or "").strip()
