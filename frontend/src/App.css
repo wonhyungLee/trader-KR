@@ -2163,129 +2163,180 @@ body {
   animation: highlight-fade 0.6s ease-out; 
 }
 
-/* Coupang Partners Inline Promotion */
-.inline-promo-box {
-  margin-top: 2px;
-  padding: 14px;
-  border-radius: 16px;
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  background: radial-gradient(860px 300px at 0% 0%, rgba(56, 189, 248, 0.08), transparent 55%),
-    radial-gradient(780px 320px at 100% 0%, rgba(249, 115, 22, 0.07), transparent 55%),
-    rgba(10, 16, 24, 0.62);
+/* Coupang Partners Popup Promotion */
+.ad-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+  background: radial-gradient(1200px 700px at 25% -10%, rgba(249, 115, 22, 0.18), transparent 55%),
+    radial-gradient(1000px 680px at 75% -5%, rgba(56, 189, 248, 0.16), transparent 58%),
+    rgba(2, 6, 23, 0.78);
 }
 
-.inline-promo-head {
+.ad-modal {
+  width: min(960px, 96vw);
+  max-height: min(88vh, 860px);
+  overflow: auto;
+  border-radius: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(11, 18, 32, 0.95);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(14px);
+  padding: 16px;
+}
+
+.ad-modal-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+  padding-right: 44px;
+  position: relative;
 }
 
-.inline-promo-title {
-  font-size: 15px;
+.ad-modal-title {
+  font-size: 18px;
   font-weight: 900;
   letter-spacing: 0.01em;
 }
 
-.inline-promo-cta {
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  background: rgba(56, 189, 248, 0.14);
-  color: var(--accent-2);
+.ad-modal-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  border: 0;
+  width: 36px;
+  height: 36px;
   border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 11px;
-  font-weight: 900;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.inline-promo-cta:hover {
-  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(15, 23, 42, 0.72);
   color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
 }
 
-.inline-promo-sub {
-  margin: 8px 0 0;
-  font-size: 12px;
+.ad-modal-close:hover {
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.ad-modal-body {
+  margin-top: 12px;
+}
+
+.ad-modal-sub {
+  margin: 0;
   color: var(--muted);
+  font-size: 13px;
 }
 
-.inline-promo-links {
-  margin-top: 10px;
+.cpb-grid {
+  margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cpb-card {
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.72);
+  color: inherit;
+  text-decoration: none;
+  overflow: hidden;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.cpb-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(15, 23, 42, 0.86);
+}
+
+.cpb-card img,
+.cpb-thumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  background: rgba(30, 41, 59, 0.38);
+}
+
+.cpb-info {
+  padding: 10px;
+  display: grid;
   gap: 8px;
 }
 
-.inline-promo-link {
+.cpb-tags {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: rgba(15, 23, 42, 0.62);
-  padding: 10px;
-  text-decoration: none;
-  color: inherit;
-  min-height: 160px;
-  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
-.inline-promo-link:hover {
-  transform: translateY(-1px);
-  border-color: rgba(56, 189, 248, 0.35);
-  background: rgba(15, 23, 42, 0.82);
+.cpb-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  color: #0b0f14;
+  background: linear-gradient(120deg, rgba(34, 197, 94, 0.9), rgba(56, 189, 248, 0.8));
 }
 
-.inline-promo-link-title {
+.cpb-title {
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.35;
+  min-height: 35px;
+}
+
+.cpb-cta {
   font-size: 12px;
-  font-weight: 800;
-  color: var(--text);
-  line-height: 1.3;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.inline-promo-link-cta {
-  font-size: 11px;
-  font-weight: 800;
+  font-weight: 900;
   color: var(--accent-2);
 }
 
-.inline-promo-thumb {
-  width: 100%;
-  aspect-ratio: 1.91 / 1;
-  object-fit: cover;
-  border-radius: 9px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(15, 23, 42, 0.45);
+.cpb-card--skeleton {
+  pointer-events: none;
 }
 
-.inline-promo-link--skeleton {
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: linear-gradient(120deg, rgba(148, 163, 184, 0.15), rgba(148, 163, 184, 0.06));
+.cpb-lines {
+  padding: 10px;
+  display: grid;
+  gap: 8px;
 }
 
-.inline-promo-thumb--skeleton {
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  background: linear-gradient(120deg, rgba(148, 163, 184, 0.15), rgba(148, 163, 184, 0.06));
-}
-
-.inline-promo-line {
+.cpb-lines span {
+  display: block;
   height: 12px;
   border-radius: 999px;
+  background: linear-gradient(120deg, rgba(148, 163, 184, 0.24), rgba(148, 163, 184, 0.12));
+  animation: cpbSkeletonPulse 1.2s ease-in-out infinite;
 }
 
-.inline-promo-line--skeleton {
-  background: linear-gradient(120deg, rgba(148, 163, 184, 0.18), rgba(148, 163, 184, 0.08));
+.cpb-lines span:last-child {
+  width: 72%;
 }
 
-.inline-promo-empty {
-  margin-top: 8px;
+@keyframes cpbSkeletonPulse {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
+}
+
+.cpb-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed rgba(148, 163, 184, 0.28);
+  border-radius: 12px;
+  padding: 14px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .ad-badge {
@@ -2318,21 +2369,28 @@ body {
   color: rgba(148, 163, 184, 0.85);
 }
 
+@media (max-width: 980px) {
+  .cpb-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 768px) {
-  .inline-promo-box {
-    padding: 12px;
+  .ad-modal {
+    width: min(96vw, 640px);
+    padding: 14px;
   }
 
-  .inline-promo-head {
-    flex-direction: column;
-    align-items: flex-start;
+  .ad-modal-title {
+    font-size: 16px;
   }
 
-  .inline-promo-links {
+  .cpb-grid {
     grid-template-columns: 1fr;
   }
 
-  .inline-promo-link {
-    min-height: 0;
+  .cpb-card img,
+  .cpb-thumb {
+    aspect-ratio: 1 / 1;
   }
 }

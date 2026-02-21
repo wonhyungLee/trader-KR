@@ -60,7 +60,10 @@ const formatPct = (value) => {
 
 const COUPANG_LINK_FILE_PATHS = ['/쿠팡광고링크.txt', '/bnf/쿠팡광고링크.txt']
 const COUPANG_LINK_PATTERN = /https?:\/\/[^\s|)]+/g
-const COUPANG_INLINE_LINK_LIMIT = 2
+const COUPANG_LINK_CODE_PATTERN = /https?:\/\/link\.coupang\.com\/a\/([A-Za-z0-9]+)/i
+const COUPANG_POPUP_ITEM_LIMIT = 3
+const COUPANG_BANNER_HIDE_KEY = 'coupang_banner_hide_until_v2'
+const COUPANG_BANNER_HIDE_MS = 6 * 60 * 60 * 1000
 
 const parseCoupangLinksFromText = (rawText) => {
   const links = []
@@ -75,24 +78,42 @@ const parseCoupangLinksFromText = (rawText) => {
   return links
 }
 
-const buildCoupangInlinePayload = ({ links = [], sourcePath = '', error = null, errorMessage = '' } = {}) => ({
-  error,
-  error_message: errorMessage,
-  keyword: 'manual_links',
-  source_path: sourcePath,
-  theme: {
-    id: 'manual-links',
-    title: '쿠팡 추천 링크',
-    tagline: '쿠팡광고링크.txt에 등록된 제휴 링크입니다.',
-    cta: '쿠팡에서 보기'
-  },
-  items: links.map((link, idx) => ({
-    title: `쿠팡 추천 링크 ${idx + 1}`,
-    link,
-    cta: '쿠팡에서 보기',
-    image: sourcePath.startsWith('/bnf/') ? '/bnf/오픈그래프이미지1.png' : '/오픈그래프이미지1.png'
-  }))
-})
+const extractCoupangLinkCode = (link) => {
+  const text = String(link || '').trim()
+  if (!text) return ''
+  const matched = text.match(COUPANG_LINK_CODE_PATTERN)
+  return matched?.[1] || ''
+}
+
+const buildCoupangPopupPayload = ({ links = [], sourcePath = '', error = null, errorMessage = '' } = {}) => {
+  const isBnfPath = String(sourcePath || '').startsWith('/bnf/')
+  const assetPrefix = isBnfPath ? '/bnf/' : '/'
+  const fallbackImage = isBnfPath ? '/bnf/오픈그래프이미지1.png' : '/오픈그래프이미지1.png'
+  return {
+    error,
+    error_message: errorMessage,
+    keyword: 'manual_links',
+    source_path: sourcePath,
+    theme: {
+      id: 'manual-links',
+      title: '쿠팡 프로모션',
+      tagline: '쿠팡광고링크.txt에 등록된 제휴 링크입니다.',
+      cta: '지금 확인하기'
+    },
+    items: links.map((link, idx) => {
+      const code = extractCoupangLinkCode(link)
+      const gifImage = code ? `${assetPrefix}coupang-gif/${code}_600.gif` : fallbackImage
+      return {
+        title: `쿠팡 추천 링크 ${idx + 1}`,
+        link,
+        cta: '지금 확인하기',
+        image: gifImage,
+        fallback_image: fallbackImage,
+        badge: '추천 광고'
+      }
+    })
+  }
+}
 
 function App() {
   const [universe, setUniverse] = useState([])
@@ -140,6 +161,7 @@ function App() {
   })
   const [mobileTab, setMobileTab] = useState('candidates')
 
+  const [showCoupangBanner, setShowCoupangBanner] = useState(false)
   const [coupangBannerLoading, setCoupangBannerLoading] = useState(false)
   const [coupangBanner, setCoupangBanner] = useState(null)
 
@@ -192,7 +214,48 @@ function App() {
     }
   }, [])
 
+  const hideCoupangBanner = useCallback(() => {
+    const hideUntil = Date.now() + COUPANG_BANNER_HIDE_MS
+    try {
+      localStorage.setItem(COUPANG_BANNER_HIDE_KEY, String(hideUntil))
+    } catch {
+      // ignore
+    }
+    setShowCoupangBanner(false)
+  }, [])
+
+  // 6시간 쿨다운: 페이지의 버튼/버튼 역할 요소/링크 상호작용 시 광고 팝업 1회 노출
   useEffect(() => {
+    if (showCoupangBanner) return
+
+    const handler = (event) => {
+      if (showCoupangBanner) return
+      if (modalOpen) return
+
+      const target = event.target
+      if (!target || !(target instanceof Element)) return
+      if (target.closest('.ad-modal-overlay')) return
+      if (!target.closest('button, [role="button"], a')) return
+      if (target.closest('[data-cp-ignore]')) return
+
+      let hideUntil = 0
+      try {
+        hideUntil = Number(localStorage.getItem(COUPANG_BANNER_HIDE_KEY) || '0') || 0
+      } catch {
+        hideUntil = 0
+      }
+      if (hideUntil && Date.now() < hideUntil) return
+
+      // 원래 클릭 핸들러를 방해하지 않도록 다음 틱에 팝업을 연다.
+      setTimeout(() => setShowCoupangBanner(true), 0)
+    }
+
+    document.addEventListener('click', handler, true)
+    return () => document.removeEventListener('click', handler, true)
+  }, [showCoupangBanner, modalOpen])
+
+  useEffect(() => {
+    if (!showCoupangBanner) return
     let cancelled = false
     setCoupangBannerLoading(true)
     setCoupangBanner(null)
@@ -207,8 +270,8 @@ function App() {
           if (links.length > 0) {
             if (cancelled) return
             setCoupangBanner(
-              buildCoupangInlinePayload({
-                links: links.slice(0, COUPANG_INLINE_LINK_LIMIT),
+              buildCoupangPopupPayload({
+                links: links.slice(0, COUPANG_POPUP_ITEM_LIMIT),
                 sourcePath: path
               })
             )
@@ -223,14 +286,14 @@ function App() {
       if (cancelled) return
       if (emptyFound) {
         setCoupangBanner(
-          buildCoupangInlinePayload({
+          buildCoupangPopupPayload({
             error: 'link_file_empty',
             errorMessage: '쿠팡광고링크.txt에 유효한 링크가 없습니다.'
           })
         )
       } else {
         setCoupangBanner(
-          buildCoupangInlinePayload({
+          buildCoupangPopupPayload({
             error: 'link_file_not_found',
             errorMessage: '쿠팡광고링크.txt 파일을 찾지 못했습니다.'
           })
@@ -245,12 +308,11 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [showCoupangBanner])
 
-  const coupangItems = useMemo(() => asArray(coupangBanner?.items), [coupangBanner])
-  const coupangLinkItems = useMemo(
+  const coupangItems = useMemo(
     () =>
-      coupangItems
+      asArray(coupangBanner?.items)
         .map((item, idx) => {
           const link = typeof item?.link === 'string' ? item.link.trim() : ''
           if (!link) return null
@@ -259,17 +321,15 @@ function App() {
             : `쿠팡 추천 링크 ${idx + 1}`
           const cta = typeof item?.cta === 'string' && item.cta.trim()
             ? item.cta.trim()
-            : '쿠팡에서 보기'
+            : '지금 확인하기'
           const image = typeof item?.image === 'string' ? item.image.trim() : ''
-          return { link, title, cta, image }
+          const fallbackImage = typeof item?.fallback_image === 'string' ? item.fallback_image.trim() : ''
+          const badge = typeof item?.badge === 'string' ? item.badge.trim() : ''
+          return { link, title, cta, image, fallbackImage, badge }
         })
         .filter(Boolean),
-    [coupangItems]
+    [coupangBanner]
   )
-  const coupangPrimaryLink = coupangLinkItems.length ? coupangLinkItems[0].link : ''
-  const coupangOgImageSrc = String(coupangBanner?.source_path || '').startsWith('/bnf/')
-    ? '/bnf/오픈그래프이미지1.png'
-    : '/오픈그래프이미지1.png'
   const coupangEmptyMessage = useMemo(() => {
     const err = coupangBanner?.error
     if (err === 'link_file_empty') return '쿠팡광고링크.txt에 광고 링크가 없습니다.'
@@ -476,11 +536,11 @@ function App() {
   }, [filter, sectorFilter])
 
   useEffect(() => {
-    document.body.style.overflow = modalOpen ? 'hidden' : ''
+    document.body.style.overflow = modalOpen || showCoupangBanner ? 'hidden' : ''
     return () => {
       document.body.style.overflow = ''
     }
-  }, [modalOpen])
+  }, [modalOpen, showCoupangBanner])
 
   useEffect(() => () => {
     if (selectionLoadingTimerRef.current) {
@@ -906,18 +966,18 @@ function App() {
               ))}
             </select>
           </div>
-          <div className="control-actions">
-            <a
-              className="discord-btn"
-              href="https://discord.gg/XHE5kKvGU"
-              target="_blank"
-              rel="noreferrer"
-            >
-              디스코드 알람받기
-            </a>
-            <button className="primary-btn" onClick={() => loadData()}>Refresh</button>
-            <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
-          </div>
+	          <div className="control-actions">
+	            <a
+	              className="discord-btn"
+	              href="https://discord.gg/XHE5kKvGU"
+	              target="_blank"
+	              rel="noreferrer"
+	            >
+	              디스코드 알람받기
+	            </a>
+	            <button className="primary-btn" onClick={() => loadData()}>Refresh</button>
+	            <div className="refresh-meta">최근 업데이트 {refreshLabel}</div>
+	          </div>
         </div>
 	      </header>
 
@@ -1148,77 +1208,7 @@ function App() {
                     <div className="filter-count">{Number(stageMap.final?.count || candidates.length || 0)}</div>
                   </div>
 
-                  <div className="inline-promo-box" aria-label="쿠팡 제휴 광고">
-                    <div className="inline-promo-head">
-                      <div className="inline-promo-title">
-                        {coupangBanner?.theme?.title || '쿠팡 추천 링크'} <span className="ad-badge">AD</span>
-                      </div>
-                      {coupangPrimaryLink ? (
-                        <a
-                          className="inline-promo-cta"
-                          href={coupangPrimaryLink}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {coupangBanner?.theme?.cta || '쿠팡에서 보기'}
-                        </a>
-                      ) : null}
-                    </div>
-                    <p className="inline-promo-sub">
-                      {coupangBanner?.theme?.tagline || '쿠팡 제휴 링크를 확인해 보세요.'}
-                    </p>
-
-                    <div className="inline-promo-links">
-                      {coupangBannerLoading ? (
-                        Array.from({ length: COUPANG_INLINE_LINK_LIMIT }).map((_, idx) => (
-                          <div key={`cp-inline-skeleton-${idx}`} className="inline-promo-link inline-promo-link--skeleton">
-                            <div className="inline-promo-thumb inline-promo-thumb--skeleton" />
-                            <div className="inline-promo-line inline-promo-line--skeleton" />
-                          </div>
-                        ))
-                      ) : (
-                        coupangLinkItems.map((item, idx) => (
-                          <a
-                            key={`cp-inline-${idx}-${item.link}`}
-                            className="inline-promo-link"
-                            href={item.link}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            <img
-                              className="inline-promo-thumb"
-                              src={item.image || coupangOgImageSrc}
-                              alt={item.title}
-                              loading="lazy"
-                              onError={(e) => {
-                                const el = e.currentTarget
-                                if (el.dataset.fallbackApplied === '1') return
-                                el.dataset.fallbackApplied = '1'
-                                el.src = el.src.includes('/bnf/') ? '/오픈그래프이미지1.png' : '/bnf/오픈그래프이미지1.png'
-                              }}
-                            />
-                            <span className="inline-promo-link-title">{item.title}</span>
-                            <span className="inline-promo-link-cta">{item.cta}</span>
-                          </a>
-                        ))
-                      )}
-                    </div>
-
-                    {!coupangBannerLoading && coupangLinkItems.length === 0 ? (
-                      <div className="inline-promo-empty">
-                        <div>{coupangEmptyMessage}</div>
-                        {coupangBanner?.error_message ? (
-                          <div className="cpb-empty-sub">{coupangBanner.error_message}</div>
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    <p className="affiliate-disclosure">
-                      이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
-                    </p>
-                  </div>
-
-                  {isMobile ? (
+	                  {isMobile ? (
                     <div key={`cand-${updateKey}`} className={`candidate-cards ${updateKey > 0 ? 'animate-update' : ''}`}>
                       {candidates.length === 0 ? (
                         <div className="empty candidate-empty">후보가 없습니다 (데이터/전략 조건 확인)</div>
@@ -1511,8 +1501,8 @@ function App() {
 		        </section>
 		      </main>
 
-		      {isMobile ? (
-		        <nav className="mobile-tabbar" aria-label="모바일 탭">
+			      {isMobile ? (
+			        <nav className="mobile-tabbar" aria-label="모바일 탭">
 		          <button
 		            type="button"
 		            className={mobileTab === 'search' ? 'active' : ''}
@@ -1534,8 +1524,93 @@ function App() {
 		          >
 		            디스코드
 		          </button>
-		        </nav>
-		      ) : null}
+			        </nav>
+			      ) : null}
+
+          {showCoupangBanner ? (
+            <div
+              className="ad-modal-overlay"
+              role="dialog"
+              aria-modal="true"
+              aria-label="쿠팡 파트너스 팝업 광고"
+            >
+              <div className="ad-modal">
+                <div className="ad-modal-head">
+                  <div className="ad-modal-title">
+                    {coupangBanner?.theme?.title || '쿠팡 프로모션'} <span className="ad-badge">AD</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="ad-modal-close"
+                    onClick={hideCoupangBanner}
+                    aria-label="닫기"
+                    title="닫기"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="ad-modal-body">
+                  <p className="ad-modal-sub">{coupangBanner?.theme?.tagline || '쿠팡광고링크.txt에 등록된 제휴 링크입니다.'}</p>
+
+                  <div className="cpb-grid">
+                    {coupangBannerLoading ? (
+                      Array.from({ length: COUPANG_POPUP_ITEM_LIMIT }).map((_, idx) => (
+                        <div key={`cp-skeleton-${idx}`} className="cpb-card cpb-card--skeleton">
+                          <div className="cpb-thumb" />
+                          <div className="cpb-lines">
+                            <span />
+                            <span />
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      coupangItems.slice(0, COUPANG_POPUP_ITEM_LIMIT).map((item, idx) => (
+                        <a
+                          key={`cp-item-${idx}-${item.link}`}
+                          className="cpb-card"
+                          href={item.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={hideCoupangBanner}
+                        >
+                          <img
+                            src={item.image || item.fallbackImage}
+                            alt={item.title || ''}
+                            loading="lazy"
+                            onError={(e) => {
+                              const el = e.currentTarget
+                              if (el.dataset.fallbackApplied === '1') return
+                              el.dataset.fallbackApplied = '1'
+                              if (item.fallbackImage) el.src = item.fallbackImage
+                            }}
+                          />
+                          <div className="cpb-info">
+                            <div className="cpb-tags">
+                              {item.badge ? <span className="cpb-badge">{item.badge}</span> : null}
+                            </div>
+                            <div className="cpb-title">{item.title}</div>
+                            <div className="cpb-cta">{item.cta || coupangBanner?.theme?.cta || '지금 확인하기'}</div>
+                          </div>
+                        </a>
+                      ))
+                    )}
+                    {!coupangBannerLoading && coupangItems.length === 0 ? (
+                      <div className="cpb-empty">
+                        <div>{coupangEmptyMessage}</div>
+                        {coupangBanner?.error_message ? (
+                          <div className="cpb-empty-sub">{coupangBanner.error_message}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <p className="affiliate-disclosure">
+                    이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
 	      {selected && modalOpen ? (
 	        <div className="modal-overlay" onClick={(e) => {
