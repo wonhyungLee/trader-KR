@@ -102,7 +102,8 @@ AUTOTRADE_INFO_PATH = Path(os.getenv("AUTOTRADE_INFO_PATH", "../자동매매정�
 AUTOTRADE_WEBHOOK_URL = str(os.getenv("AUTOTRADE_WEBHOOK_URL", "") or "").strip()
 AUTOTRADE_WEBHOOK_PASSWORD = str(os.getenv("AUTOTRADE_WEBHOOK_PASSWORD", "") or "").strip()
 AUTOTRADE_KIS_NUMBER = str(os.getenv("AUTOTRADE_KIS_NUMBER", "1") or "1").strip() or "1"
-AUTOTRADE_QTY = max(1, int(os.getenv("AUTOTRADE_QTY", "1") or 1))
+# Autotrade webhook orders are fixed to 1 share per order.
+AUTOTRADE_QTY = 1
 AUTOTRADE_PLANNER_INTERVAL_SEC = max(30, int(os.getenv("AUTOTRADE_PLANNER_INTERVAL_SEC", "300") or 300))
 AUTOTRADE_DISPATCH_INTERVAL_SEC = max(5, int(os.getenv("AUTOTRADE_DISPATCH_INTERVAL_SEC", "60") or 60))
 AUTOTRADE_WEBHOOK_TIMEOUT_SEC = max(1.0, float(os.getenv("AUTOTRADE_WEBHOOK_TIMEOUT_SEC", "8") or 8.0))
