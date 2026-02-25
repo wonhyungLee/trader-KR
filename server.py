@@ -114,7 +114,8 @@ AUTOTRADE_EXIT_WINDOW_DAYS = max(
     min(30, int(os.getenv("AUTOTRADE_EXIT_WINDOW_DAYS", str(SELECTION_HISTORY_DAYS)) or SELECTION_HISTORY_DAYS)),
 )
 AUTOTRADE_MAX_EXIT_CODES = max(0, int(os.getenv("AUTOTRADE_MAX_EXIT_CODES", "60") or 60))
-AUTOTRADE_MAX_SELECTION_CODES = max(0, int(os.getenv("AUTOTRADE_MAX_SELECTION_CODES", "20") or 20))
+AUTOTRADE_MAX_SELECTION_CODES = max(0, int(os.getenv("AUTOTRADE_MAX_SELECTION_CODES", "10") or 10))
+AUTOTRADE_MAX_BUY_EXECUTIONS = max(0, int(os.getenv("AUTOTRADE_MAX_BUY_EXECUTIONS", "5") or 5))
 AUTOTRADE_SELL_PRICE_SOURCE = str(os.getenv("AUTOTRADE_SELL_PRICE_SOURCE", "target") or "target").strip().lower()
 AUTOTRADE_MAX_SEND_PER_TICK = max(1, int(os.getenv("AUTOTRADE_MAX_SEND_PER_TICK", "20") or 20))
 _autotrade_thread_lock = threading.Lock()
@@ -1611,9 +1612,27 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
         if not orders:
             return {"ok": True, "sent": 0, "pending": 0}
 
+        sent_buy_rows = conn.execute(
+            """
+            SELECT code
+            FROM autotrade_webhook_queue
+            WHERE exec_date=?
+              AND side='buy'
+              AND status IN ('SENT','DONE')
+            """,
+            (str(today),),
+        ).fetchall()
+        sent_buy_codes = {
+            _normalize_code(r["code"])
+            for r in (sent_buy_rows or [])
+            if isinstance(r, sqlite3.Row) and _normalize_code(r["code"])
+        }
+        sent_buy_count = len(sent_buy_codes)
+
         sent = 0
         attempted = 0
         checked = 0
+        cancelled_after_buy_limit = 0
         for o in orders:
             if attempted >= AUTOTRADE_MAX_SEND_PER_TICK:
                 break
@@ -1621,6 +1640,19 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
             code = str(o["code"] or "")
 
             side = str(o["side"] or "")
+            code_norm = _normalize_code(code)
+
+            if side == "buy" and AUTOTRADE_MAX_BUY_EXECUTIONS > 0 and sent_buy_count >= AUTOTRADE_MAX_BUY_EXECUTIONS:
+                continue
+
+            if (
+                side == "sell"
+                and AUTOTRADE_MAX_BUY_EXECUTIONS > 0
+                and sent_buy_count >= AUTOTRADE_MAX_BUY_EXECUTIONS
+                and code_norm not in sent_buy_codes
+            ):
+                continue
+
             order_type = str(o["order_type"] or "")
             qty = int(o["qty"] or 1)
             exchange = str(o["exchange"] or "")
@@ -1660,6 +1692,10 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 attempted += 1
                 sent += 1
+                if side == "buy":
+                    sent_buy_count += 1
+                    if code_norm:
+                        sent_buy_codes.add(code_norm)
                 continue
 
             resp_code = None
@@ -1699,9 +1735,69 @@ def _autotrade_dispatch_tick(settings: Dict[str, Any]) -> Dict[str, Any]:
                 ),
             )
             sent += 1
+            if side == "buy":
+                sent_buy_count += 1
+                if code_norm:
+                    sent_buy_codes.add(code_norm)
+
+        if AUTOTRADE_MAX_BUY_EXECUTIONS > 0 and sent_buy_count >= AUTOTRADE_MAX_BUY_EXECUTIONS:
+            cur = conn.execute(
+                """
+                UPDATE autotrade_webhook_queue
+                SET status='CANCELLED', updated_at=?
+                WHERE exec_date=?
+                  AND side='buy'
+                  AND status IN ('PENDING','FAILED')
+                """,
+                (now, str(today)),
+            )
+            if isinstance(cur.rowcount, int) and cur.rowcount > 0:
+                cancelled_after_buy_limit += cur.rowcount
+
+            cur = conn.execute(
+                """
+                UPDATE autotrade_webhook_queue
+                SET status='CANCELLED', updated_at=?
+                WHERE exec_date=?
+                  AND side='sell'
+                  AND status IN ('PENDING','FAILED')
+                  AND code NOT IN (
+                    SELECT code
+                    FROM autotrade_webhook_queue
+                    WHERE exec_date=?
+                      AND side='buy'
+                      AND status IN ('SENT','DONE')
+                  )
+                """,
+                (now, str(today), str(today)),
+            )
+            if isinstance(cur.rowcount, int) and cur.rowcount > 0:
+                cancelled_after_buy_limit += cur.rowcount
+
+        pending_after = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM autotrade_webhook_queue
+                WHERE exec_date=?
+                  AND status='PENDING'
+                """,
+                (str(today),),
+            ).fetchone()[0]
+            or 0
+        )
 
         conn.commit()
-        return {"ok": True, "sent": sent, "attempted": attempted, "checked": checked, "pending": max(0, len(orders) - attempted)}
+        return {
+            "ok": True,
+            "sent": sent,
+            "attempted": attempted,
+            "checked": checked,
+            "pending": pending_after,
+            "buy_limit": AUTOTRADE_MAX_BUY_EXECUTIONS,
+            "buy_sent_total": sent_buy_count,
+            "cancelled_after_buy_limit": cancelled_after_buy_limit,
+        }
     finally:
         try:
             conn.close()
@@ -3397,6 +3493,7 @@ def autotrade_status():
             "exit_window_days": AUTOTRADE_EXIT_WINDOW_DAYS,
             "max_exit_codes": AUTOTRADE_MAX_EXIT_CODES,
             "max_selection_codes": AUTOTRADE_MAX_SELECTION_CODES,
+            "max_buy_executions": AUTOTRADE_MAX_BUY_EXECUTIONS,
             "webhook": {"url": cfg.get("url") or "", "kis_number": cfg.get("kis_number") or ""},
             "today": today,
             "plan_date": plan_date,
